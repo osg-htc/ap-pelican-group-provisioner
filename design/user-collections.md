@@ -451,6 +451,15 @@ ConfigMap in Kubernetes) and secrets arrive as environment variables (a Secret).
 is external to the container (Kubernetes CronJob or a host cron running `docker run`), which
 keeps the image a single-purpose executable.
 
+## Relationship to project collections
+
+The same provisioner runs a second job kind, described in `project-collections.md`, which
+gives each Topology project a shared collection granted to a group of its members. The two
+kinds share the configuration loader, the username rules, the collection reconciler with
+its exclusive base path and deletion ceiling, and the Pelican client. Collection metadata
+carries `provisioner.kind` so the kinds never mistake each other's collections for their
+own.
+
 ## Verifying a user's access
 
 `scripts/test-collection-access.sh <username> [other-username]` proves the grant end to end

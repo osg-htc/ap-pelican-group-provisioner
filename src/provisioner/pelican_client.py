@@ -56,6 +56,28 @@ class PelicanCollection:
 
 
 @dataclass(frozen=True)
+class GroupMember:
+    user_id: str
+    source: str   # "oidc" when Pelican asserted it from a login claim, otherwise added via the API
+
+
+@dataclass(frozen=True)
+class PelicanGroup:
+    id: str
+    name: str
+    description: str = ""
+    members: tuple[GroupMember, ...] = ()
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> PelicanGroup:
+        members = tuple(
+            GroupMember(user_id=str(m["userId"]), source=m.get("source") or "")
+            for m in data.get("members") or [] if m.get("userId")
+        )
+        return cls(id=str(data["id"]), name=data.get("name", ""), description=data.get("description") or "", members=members)
+
+
+@dataclass(frozen=True)
 class CollectionAcl:
     subject_type: str
     subject_id: str
@@ -204,9 +226,31 @@ class PelicanClient:
         response = self._request("GET", f"/origin_ui/collections/{collection_id}/acl")
         return [CollectionAcl.from_api(item) for item in response.json() or []]
 
-    def grant_user_acl(self, collection_id: str, user_id: str, role: str) -> None:
-        body = {"subjectType": "user", "subjectId": user_id, "role": role}
+    def grant_acl(self, collection_id: str, subject_type: str, subject_id: str, role: str) -> None:
+        """Grant role to a user or group, addressed by its immutable ID."""
+        body = {"subjectType": subject_type, "subjectId": subject_id, "role": role}
         self._request("POST", f"/origin_ui/collections/{collection_id}/acl", json=body)
+
+    # -- groups --------------------------------------------------------------------
+
+    def list_groups(self) -> list[PelicanGroup]:
+        """Every group with its members embedded, so membership needs no further calls."""
+        response = self._request("GET", "/groups")
+        return [PelicanGroup.from_api(item) for item in response.json() or []]
+
+    def create_group(self, name: str, display_name: str, description: str) -> PelicanGroup:
+        body = {"name": name, "displayName": display_name, "description": description}
+        response = self._request("POST", "/groups", json=body)
+        return PelicanGroup.from_api(response.json())
+
+    def delete_group(self, group_id: str) -> None:
+        self._request("DELETE", f"/groups/{group_id}")
+
+    def add_group_member(self, group_id: str, user_id: str) -> None:
+        self._request("POST", f"/groups/{group_id}/members", json={"userId": user_id})
+
+    def remove_group_member(self, group_id: str, user_id: str) -> None:
+        self._request("DELETE", f"/groups/{group_id}/members/{user_id}")
 
 
 def _http_error(method: str, path: str, response: httpx.Response) -> PelicanError:

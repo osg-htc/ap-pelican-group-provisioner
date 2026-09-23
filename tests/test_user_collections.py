@@ -2,23 +2,17 @@ from __future__ import annotations
 
 import pytest
 
+from provisioner.identifiers import sanitize_identifier, with_suffix
+from provisioner.jobs import JobRunner
 from provisioner.ldap_client import LdapPerson
-from provisioner.user_collections import (
-    EXIT_OK,
-    EXIT_PARTIAL,
-    HardError,
-    UserCollectionSync,
-    sanitize_identifier,
-    with_suffix,
-)
+from provisioner.report import EXIT_OK, EXIT_PARTIAL, HardError
 
 from conftest import BASE_PATH, DESCRIPTION, GROUP, FakeLdap, acl, make_settings, person
 
 
 def run(pelican, people, **settings_overrides):
     settings = make_settings(**settings_overrides)
-    sync = UserCollectionSync(FakeLdap(people), pelican, settings, settings.jobs[0])
-    return sync.run()
+    return JobRunner(FakeLdap(people), pelican, settings, settings.jobs[0]).run()
 
 
 def collection_names(pelican):
@@ -157,7 +151,7 @@ def test_does_not_touch_correct_acl(pelican):
     report = run(pelican, [person("alice")])
 
     assert report.acls_repaired == 0
-    assert not any(call[0] == "grant_user_acl" for call in pelican.calls)
+    assert not any(call[0] == "grant_acl" for call in pelican.calls)
 
 
 def test_failed_grant_cleans_up_new_collection(pelican):
@@ -235,7 +229,7 @@ def test_sanitized_username_keeps_raw_name_for_collection(pelican):
     assert report2.users_existing == 1
     assert report2.collections_created == 0
     assert report2.collections_deleted == 0
-    assert not any(c[0] in {"create_user", "create_collection", "delete_collection", "grant_user_acl"} for c in pelican.calls)
+    assert not any(c[0] in {"create_user", "create_collection", "delete_collection", "grant_acl"} for c in pelican.calls)
 
 
 def test_sanitized_user_collection_removed_when_they_leave(pelican):
@@ -279,7 +273,7 @@ def test_dry_run_makes_no_writes(pelican):
 
     report = run(pelican, [person("alice"), person("bob")], dry_run=True)
 
-    writes = {"create_user", "create_collection", "delete_collection", "grant_user_acl"}
+    writes = {"create_user", "create_collection", "delete_collection", "grant_acl"}
     assert not any(c[0] in writes for c in pelican.calls)
     assert report.users_created == 1
     assert report.collections_created == 1
@@ -347,7 +341,7 @@ def test_base_path_change_migrates_this_jobs_collections(pelican):
 def test_job_group_is_what_gets_queried(pelican):
     settings = make_settings()
     ldap = FakeLdap({GROUP: [person("alice")], "other": [person("bob")]})
-    UserCollectionSync(ldap, pelican, settings, settings.jobs[0]).run()
+    JobRunner(ldap, pelican, settings, settings.jobs[0]).run()
     assert ldap.queried == [GROUP]
     assert collection_names(pelican) == ["alice"]
 
@@ -383,7 +377,7 @@ def test_ceiling_checked_before_any_change(pelican):
     newcomer = person("zed")
     with pytest.raises(HardError):
         run(pelican, people[2:] + [newcomer])
-    assert not any(c[0] in {"create_user", "create_collection", "grant_user_acl", "delete_collection"} for c in pelican.calls)
+    assert not any(c[0] in {"create_user", "create_collection", "grant_acl", "delete_collection"} for c in pelican.calls)
 
 
 def test_ceiling_override_and_fraction(pelican):

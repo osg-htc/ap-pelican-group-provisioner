@@ -6,13 +6,18 @@ from provisioner.config import Job, LdapSettings, PelicanSettings, RunSettings, 
 from provisioner.ldap_client import LdapPerson
 from provisioner.pelican_client import (
     CollectionAcl,
+    GroupMember,
     PelicanCollection,
     PelicanError,
+    PelicanGroup,
     PelicanUser,
 )
 
-BASE_PATH = "/ospool/ap40/data"   # the job's base_path
+BASE_PATH = "/ospool/ap40/data"   # the users job's base_path
 GROUP = "ap40-login"
+PROJECTS_BASE = "/ospool/projects"
+PROJECTS_GROUP = "CO:members:active"
+PROJECTS_URL = "https://topology.example.org/miscproject/json"
 DESCRIPTION = "AUTOMATED: Do not manually edit this group."
 
 
@@ -30,11 +35,12 @@ def make_settings(**overrides) -> Settings:
         admin_password="secret",
         collection_role=overrides.pop("collection_role", "write"),
     )
+    jobs = overrides.pop("jobs", None) or [Job(group=GROUP, base_path=overrides.pop("base_path", BASE_PATH))]
     run = RunSettings(
         dry_run=overrides.pop("dry_run", False),
         max_delete_fraction=overrides.pop("max_delete_fraction", 0.05),
         allow_mass_delete=overrides.pop("allow_mass_delete", False),
-        jobs=[Job(group=GROUP, base_path=overrides.pop("base_path", BASE_PATH))],
+        jobs=jobs,
     )
     assert not overrides, f"unknown overrides: {overrides}"
     return Settings(ldap=ldap, pelican=pelican, run=run)
@@ -63,6 +69,7 @@ class FakePelican:
         self.collections: dict[str, PelicanCollection] = {}
         self.acls: dict[str, list[CollectionAcl]] = {}
         self.metadata: dict[str, dict[str, str]] = {}
+        self.groups: dict[str, PelicanGroup] = {}
         self.calls: list[tuple] = []
         self.fail_grant_for: set[str] = set()
         self.fail_create_user: set[str] = set()
@@ -92,6 +99,20 @@ class FakePelican:
         self.acls[c.id] = []
         self.metadata[c.id] = {"provisioner.source": "ldap", "provisioner.group": group} if group else {}
         return c
+
+    def add_group(self, name: str, members: list[str] = (), description: str = "", source: str = "oidc") -> PelicanGroup:
+        """Arrange a group. Default source 'oidc' mimics a group Pelican asserted from a login claim."""
+        g = PelicanGroup(id=self._id("g"), name=name, description=description,
+                         members=tuple(GroupMember(user_id=m, source=source) for m in members))
+        self.groups[g.id] = g
+        return g
+
+    def group_named(self, name: str) -> PelicanGroup | None:
+        return next((g for g in self.groups.values() if g.name == name), None)
+
+    def writes(self) -> list[tuple]:
+        reads = {"list_users", "list_collections", "list_acls", "get_collection_metadata", "list_groups"}
+        return [c for c in self.calls if c[0] not in reads]
 
     # OriginApi
     def list_users(self) -> list[PelicanUser]:
@@ -132,24 +153,55 @@ class FakePelican:
         self.calls.append(("list_acls", collection_id))
         return list(self.acls[collection_id])
 
-    def grant_user_acl(self, collection_id, user_id, role) -> None:
-        self.calls.append(("grant_user_acl", collection_id, user_id, role))
+    def grant_acl(self, collection_id, subject_type, subject_id, role) -> None:
+        self.calls.append(("grant_acl", collection_id, subject_type, subject_id, role))
         name = self.collections[collection_id].name
         if name in self.fail_grant_for:
             raise PelicanError("boom", status=400)
-        self.acls[collection_id].append(CollectionAcl(subject_type="user", subject_id=user_id, role=role))
+        self.acls[collection_id].append(CollectionAcl(subject_type=subject_type, subject_id=subject_id, role=role))
+
+    def list_groups(self) -> list[PelicanGroup]:
+        self.calls.append(("list_groups",))
+        return list(self.groups.values())
+
+    def create_group(self, name, display_name, description) -> PelicanGroup:
+        self.calls.append(("create_group", name, display_name, description))
+        if self.group_named(name) is not None:
+            raise PelicanError("group exists", status=400)
+        g = PelicanGroup(id=self._id("g"), name=name, description=description)
+        self.groups[g.id] = g
+        return g
+
+    def delete_group(self, group_id) -> None:
+        self.calls.append(("delete_group", group_id))
+        del self.groups[group_id]
+
+    def add_group_member(self, group_id, user_id) -> None:
+        self.calls.append(("add_group_member", group_id, user_id))
+        g = self.groups[group_id]
+        if any(m.user_id == user_id for m in g.members):
+            raise PelicanError("already a member", status=400)
+        self.groups[group_id] = PelicanGroup(id=g.id, name=g.name, description=g.description,
+                                             members=g.members + (GroupMember(user_id=user_id, source="api"),))
+
+    def remove_group_member(self, group_id, user_id) -> None:
+        self.calls.append(("remove_group_member", group_id, user_id))
+        g = self.groups[group_id]
+        self.groups[group_id] = PelicanGroup(id=g.id, name=g.name, description=g.description,
+                                             members=tuple(m for m in g.members if m.user_id != user_id))
 
 
-def acl(user_id: str, role: str = "write") -> CollectionAcl:
-    return CollectionAcl(subject_type="user", subject_id=user_id, role=role)
+def acl(subject_id: str, role: str = "write", subject_type: str = "user") -> CollectionAcl:
+    return CollectionAcl(subject_type=subject_type, subject_id=subject_id, role=role)
 
 
-def person(username: str, sub: str | None = None, cn: str | None = None) -> LdapPerson:
+def person(username: str, sub: str | None = None, cn: str | None = None, groups: list[str] = ()) -> LdapPerson:
     return LdapPerson(
         dn=f"uid={sub or username},ou=people,dc=example",
         username=username,
         display_name=cn or username.title(),
         sub=sub or f"http://cilogon.org/serverA/users/{username}",
+        groups=frozenset(groups),
     )
 
 

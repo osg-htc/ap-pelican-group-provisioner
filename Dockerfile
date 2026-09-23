@@ -31,4 +31,4 @@ WORKDIR /app
 
 # Mount the YAML config at /etc/provisioner/config.yaml and pass secrets as environment
 # variables. See config.example.yaml and .env.example.
-ENTRYPOINT ["sync-user-collections"]
+ENTRYPOINT ["sync-collections"]

@@ -211,3 +211,27 @@ def test_fallback_job_bad_base_path_names_the_variable(clean_env):
     with pytest.raises(ConfigError) as info:
         load_settings()
     assert "PELICAN_BASE_PATH: Value error, must start with '/'" in str(info.value)
+
+
+def test_projects_job_from_yaml(clean_env, tmp_path):
+    path = write_yaml(tmp_path, YAML.replace(
+        "  - group: ap41-login\n    base_path: /ospool/ap41\n",
+        "  - kind: projects\n    group: CO:members:active\n    base_path: /ospool/projects\n"
+        "    projects_url: https://topology.example.org/miscproject/json\n"))
+    for k, v in SECRETS.items():
+        clean_env.setenv(k, v)
+    s = load_settings(str(path))
+    assert [(j.kind, j.group, j.base_path) for j in s.jobs] == [
+        ("users", "ap40-login", "/test/data"), ("projects", "CO:members:active", "/ospool/projects")]
+    assert s.jobs[1].projects_url == "https://topology.example.org/miscproject/json"
+
+
+def test_projects_job_without_url_is_reported(clean_env, tmp_path):
+    path = write_yaml(tmp_path, YAML.replace(
+        "  - group: ap41-login\n    base_path: /ospool/ap41\n",
+        "  - kind: projects\n    group: CO:members:active\n    base_path: /ospool/projects\n"))
+    for k, v in SECRETS.items():
+        clean_env.setenv(k, v)
+    with pytest.raises(ConfigError) as info:
+        load_settings(str(path))
+    assert "jobs.1: Value error, a projects job needs projects_url" in str(info.value)

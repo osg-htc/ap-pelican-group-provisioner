@@ -28,16 +28,24 @@ pelican:
   # ca_bundle: /etc/ssl/certs/private-ca.pem
   # admin_username: admin              # alternative to PELICAN_API_TOKEN, with PELICAN_ADMIN_PASSWORD in env
 
-# One entry per LDAP group to synchronize. Each member gets a collection at
-# <base_path>/<employeeNumber>. base_path must be at or below a namespace the Origin exports;
-# with an export of /test, a base_path of /test/data puts collections at /test/data/<user>.
-#
-# The provisioner owns each base_path exclusively: any collection under it that is not a
-# current member's collection is deleted, including hand-made ones and duplicates. Jobs
-# may not share or nest base paths. Collections outside every base_path are never touched.
+# One entry per synchronization job. base_path must be at or below a namespace the Origin
+# exports. The provisioner owns each base_path exclusively: any collection under it that it
+# did not create for a current member or project is deleted, including hand-made ones and
+# duplicates. Jobs may not share or nest base paths. Nothing outside a base_path is touched.
 jobs:
+  # kind "users" (the default): every member of the group gets a personal collection at
+  # <base_path>/<employeeNumber>, granted to their own Pelican user.
   - group: ap40-login
     base_path: /test/data
+
+  # kind "projects": members' other memberships are matched against the project names in
+  # projects_url. Every project with at least one member gets a collection at
+  # <base_path>/<project>, granted to a Pelican group of the same name whose members are
+  # kept equal to the project's members.
+  - kind: projects
+    group: CO:members:active
+    base_path: /test/projects
+    projects_url: https://topology.opensciencegrid.org/miscproject/json
 
 dry_run: false
 # Refuse a run that would delete more than this fraction of a job's collections (one

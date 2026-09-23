@@ -24,18 +24,20 @@ class LdapPerson:
     username: str | None
     display_name: str | None
     sub: str | None
+    groups: frozenset[str] = frozenset()   # every value of the membership attribute
+
+
+def _values(value: object) -> list[str]:
+    """ldap3 returns a list for multi-valued attributes and a scalar otherwise."""
+    if value is None:
+        return []
+    items = value if isinstance(value, (list, tuple)) else [value]
+    return [text for text in (str(v).strip() for v in items) if text]
 
 
 def _first(value: object) -> str | None:
-    """ldap3 returns multi-valued attributes as lists; take the first string."""
-    if value is None:
-        return None
-    if isinstance(value, (list, tuple)):
-        if not value:
-            return None
-        value = value[0]
-    text = str(value).strip()
-    return text or None
+    values = _values(value)
+    return values[0] if values else None
 
 
 class LdapClient:
@@ -78,7 +80,7 @@ class LdapClient:
         s = self._settings
 
         search_filter = f"({s.member_of_attribute}={escape_filter_chars(group)})"
-        attributes = [s.username_attribute, s.display_name_attribute, s.sub_attribute]
+        attributes = [s.username_attribute, s.display_name_attribute, s.sub_attribute, s.member_of_attribute]
         log.debug("LDAP search base=%s filter=%s", s.user_search_base, search_filter)
 
         people: list[LdapPerson] = []
@@ -101,6 +103,7 @@ class LdapClient:
                         username=_first(attrs.get(s.username_attribute)),
                         display_name=_first(attrs.get(s.display_name_attribute)),
                         sub=_first(attrs.get(s.sub_attribute)),
+                        groups=frozenset(_values(attrs.get(s.member_of_attribute))),
                     )
                 )
         except LDAPException as exc:

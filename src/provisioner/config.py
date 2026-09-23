@@ -10,7 +10,8 @@ then /etc/provisioner/config.yaml, and runs without a file if neither exists.
 
     ldap:       -> LdapSettings,    env prefix LDAP_
     pelican:    -> PelicanSettings, env prefix PELICAN_
-    top level   -> RunSettings:     jobs (env JOBS as JSON, or LDAP_GROUP + PELICAN_BASE_PATH),
+    top level   -> RunSettings:     jobs (env JOBS as JSON, or LDAP_GROUP + PELICAN_BASE_PATH
+                                    for a single users job),
                                     dry_run, max_delete_fraction, allow_mass_delete,
                                     log_level, log_format (env names are the upper-cased fields)
 """
@@ -154,18 +155,33 @@ def clean_base_path(value: str) -> str:
 class Job(BaseModel):
     """One LDAP group synchronized into one subtree of the Origin.
 
-    base_path is the prefix under which each member's collection is created:
-    <base_path>/<employeeNumber>. It may sit anywhere at or below an exported namespace,
-    e.g. base_path /test/data on an Origin exporting /test.
+    kind "users": every member gets a personal collection at <base_path>/<employeeNumber>
+    with a write grant to their own Pelican user.
+
+    kind "projects": the members' other memberships are matched against the project names
+    in the JSON at projects_url; every project with at least one member gets a collection at
+    <base_path>/<project> with a write grant to a Pelican group of the same name whose
+    membership is kept equal to the project's members.
+
+    base_path may sit anywhere at or below an exported namespace, e.g. /test/data on an
+    Origin exporting /test. The script owns it exclusively.
     """
 
     group: str
     base_path: str
+    kind: Literal["users", "projects"] = "users"
+    projects_url: str | None = None
 
     @field_validator("base_path")
     @classmethod
     def _clean(cls, value: str) -> str:
         return clean_base_path(value)
+
+    @model_validator(mode="after")
+    def _projects_need_url(self) -> Job:
+        if self.kind == "projects" and not self.projects_url:
+            raise ValueError("a projects job needs projects_url")
+        return self
 
 
 class RunSettings(SectionSettings):
@@ -224,8 +240,10 @@ def _describe(prefix: str, error: ValidationError) -> list[str]:
     lines = []
     for item in error.errors():
         parts = [str(part) for part in item["loc"]]
-        if len(parts) <= 1:
-            name = f"{prefix}{parts[0]}".upper() if parts else f"{prefix}<root>".upper()
+        if not parts:
+            name = prefix.rstrip("_") or "config"   # a model-level rule, e.g. the credentials check
+        elif len(parts) == 1:
+            name = f"{prefix}{parts[0]}".upper()
         else:
             name = ".".join(parts)
         lines.append(f"{name}: {item['msg']}")

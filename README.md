@@ -5,9 +5,12 @@ Docker image, configured by a YAML file plus environment variables for secrets.
 
 ## Scripts
 
-| Command                 | Design                                | Purpose                                                        |
-|-------------------------|---------------------------------------|----------------------------------------------------------------|
-| `sync-user-collections` | [design/user-collections.md](design/user-collections.md) | Create Pelican users for an LDAP group and give each one a collection. |
+| Command            | Job kind   | Design                                                       | Purpose |
+|--------------------|------------|--------------------------------------------------------------|---------|
+| `sync-collections` | `users`    | [design/user-collections.md](design/user-collections.md)     | A personal collection for every member of an LDAP group. |
+| `sync-collections` | `projects` | [design/project-collections.md](design/project-collections.md) | A collection per Topology project, granted to a group of its members. |
+
+One command runs every job in `config.yaml`.
 
 ## Configuration
 
@@ -16,9 +19,10 @@ overrides the same setting in the file. See `config.example.yaml` for every sett
 `.env.example` for the secrets. The file is found via `CONFIG_FILE`, then `./config.yaml`,
 then `/etc/provisioner/config.yaml`.
 
-The `jobs` list maps LDAP groups to base paths. Each member of a group gets a collection at
-`<base_path>/<username>`, so a job with `base_path: /test/data` on an Origin exporting `/test`
-creates `/test/data/alice`, `/test/data/bob`, and so on.
+The `jobs` list maps LDAP groups to base paths. A `users` job gives each member a collection
+at `<base_path>/<username>`. A `projects` job matches members' other group memberships against
+the project names in a Topology JSON feed and gives each project with members a collection at
+`<base_path>/<project>`, granted to a Pelican group of the project's members.
 
 The provisioner owns each base path exclusively. Anything under it that is not a current
 member's collection is deleted, and nothing outside it is ever touched. A run that would
@@ -32,7 +36,7 @@ delete more than 5% of a job's collections stops before changing anything; set
 uv sync
 cp config.example.yaml config.yaml   # edit jobs, origin, ldap
 cp .env.example .env                 # fill in secrets
-uv run --env-file .env sync-user-collections
+uv run --env-file .env sync-collections
 ```
 
 Run the tests with `uv run pytest`.

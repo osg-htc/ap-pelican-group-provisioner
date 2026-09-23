@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-sync-user-collections = "provisioner.user_collections:main"
+sync-collections = "provisioner.jobs:main"
 
 [dependency-groups]
 dev = [
