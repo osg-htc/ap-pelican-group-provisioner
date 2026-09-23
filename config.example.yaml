@@ -1,0 +1,49 @@
+# Provisioner configuration. Copy to config.yaml (ignored by git) or mount at
+# /etc/provisioner/config.yaml, or point CONFIG_FILE at it.
+#
+# Every value here can also be set as an environment variable, which takes precedence:
+# ldap.* -> LDAP_<NAME>, pelican.* -> PELICAN_<NAME>, top level -> <NAME>. Secrets are
+# left out of this file on purpose and come from the environment:
+#   LDAP_BIND_PASSWORD, and PELICAN_API_TOKEN or PELICAN_ADMIN_PASSWORD.
+
+ldap:
+  server: ldap-replica-1.osg.chtc.io
+  port: 636
+  use_ssl: true
+  bind_dn: cn=readonly,ou=system,dc=osg-htc,dc=org
+  user_search_base: ou=people,dc=osg-htc,dc=org
+  member_of_attribute: isMemberOf      # attribute on person entries listing their groups
+  username_attribute: employeeNumber   # sanitized with Pelican's identifier rule
+  display_name_attribute: cn
+  sub_attribute: uid
+  allow_empty_group: false             # refuse a run that would delete every collection
+
+pelican:
+  origin_url: https://origin.example.org:8444
+  issuer: https://cilogon.org          # written on created users
+  collection_role: write               # read | write | owner
+  collection_description: "AUTOMATED: Do not manually edit this group."
+  collection_visibility: private
+  verify_tls: true                     # false only for local self-signed test Origins
+  # ca_bundle: /etc/ssl/certs/private-ca.pem
+  # admin_username: admin              # alternative to PELICAN_API_TOKEN, with PELICAN_ADMIN_PASSWORD in env
+
+# One entry per LDAP group to synchronize. Each member gets a collection at
+# <base_path>/<employeeNumber>. base_path must be at or below a namespace the Origin exports;
+# with an export of /test, a base_path of /test/data puts collections at /test/data/<user>.
+#
+# The provisioner owns each base_path exclusively: any collection under it that is not a
+# current member's collection is deleted, including hand-made ones and duplicates. Jobs
+# may not share or nest base paths. Collections outside every base_path are never touched.
+jobs:
+  - group: ap40-login
+    base_path: /test/data
+
+dry_run: false
+# Refuse a run that would delete more than this fraction of a job's collections (one
+# deletion is always allowed). A partial LDAP result would otherwise look like a mass
+# departure. Override for a single intentional run with ALLOW_MASS_DELETE=true in the
+# environment, e.g. when changing a job's base_path.
+max_delete_fraction: 0.05
+log_level: INFO
+log_format: text                       # text | json
