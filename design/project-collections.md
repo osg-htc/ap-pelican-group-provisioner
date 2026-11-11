@@ -54,8 +54,30 @@ like any other unwanted collection under the base path.
 Pelican already creates groups on its own: when a user logs in through CILogon, every
 asserted group claim becomes a group row with `source: oidc` and the user becomes a member
 with the same source. Project names are among those claims, so a project group may exist
-before this job ever runs. Groups are therefore matched by name and reused whatever their
-origin; only missing groups are created.
+before this job ever runs. Groups are therefore matched by name and reused if the
+provisioner's own account controls them; only missing groups are created.
+
+**Who controls a group.** Besides system admins, Pelican lets two parties change a group's
+membership: its owner (`ownerId`), and its group admin (`adminId`, a single user when
+`adminType` is `user`, or every member of another group when it is `group`). Anyone in either
+role could add people to a project group between runs, and they would get the project's
+collection. So each run reads its own user ID from `GET /me` and keeps a project group only
+when that account is the owner and there is no group admin, or the group admin is that same
+user. Pelican gives groups it creates from login claims to the built-in admin, so when the
+provisioner runs as the built-in admin those are kept too.
+
+A project group anyone else controls is **deleted and recreated** under the provisioner's
+account, with the marker description and the project's members; the collection is then
+granted to the new group. Deleting a group removes its grants, so until the new grant is made
+the project has no access at all, never the old controller's. If the delete fails the project
+is skipped for that run rather than granted to the foreign group. Only groups named after a
+project with members are checked; other groups on the Origin are not touched.
+
+Replacement changes the group's ID, so it is under the same ceiling as collection deletions:
+more than `max_delete_fraction` of the project groups in use (always allowing one) stops the
+run before any write. The likely cause of a mass replacement is the provisioner running as a
+different account than before, which makes every group look foreign; `ALLOW_MASS_DELETE=true`
+for one run moves them all to the new account.
 
 Membership is reconciled per group: members the project has and the group lacks are added;
 members the group has and the project lacks are removed, **except** rows Pelican asserted
@@ -71,7 +93,8 @@ the collection, and was refused under `/test/projects/ACE_NIAID`, a project they
 
 A group this job created (marker description) whose project has no members any more is
 deleted, after the collections have been reconciled. Groups without the marker were created
-by someone else, or by Pelican from claims, and are never deleted.
+by someone else, or by Pelican from claims, and are not deleted when their project goes away;
+only replaced, as above, while their project has members and someone else controls them.
 
 Because the group carries the project name, a member's token gets the collection's scopes
 two ways: through the DB membership this job maintains, and through the `wlcg.groups` claim
@@ -85,9 +108,12 @@ CILogon asserts. Either alone is sufficient.
    users job's rules. Build `wanted`, project -> usernames. Zero projects is a hard error
    unless `LDAP_ALLOW_EMPTY_GROUP` is set.
 4. Plan the collections under the base path exactly as the users job does, with project
-   names as the wanted names, and apply the deletion ceiling. Nothing has changed yet.
+   names as the wanted names, and apply the deletion ceiling. List groups, read the
+   provisioner's own user ID from `GET /me`, find project groups someone else controls and
+   apply the ceiling to replacing them. Nothing has changed yet.
 5. Create missing users.
-6. List groups; create missing project groups; reconcile membership by user ID.
+6. Delete and recreate project groups someone else controls; create missing project groups;
+   reconcile membership by user ID.
 7. Delete planned collections; create missing collections with a group grant; repair grants
    on kept collections.
 8. Delete this job's orphaned groups.
@@ -102,8 +128,8 @@ the deletion ceiling defaults to 5% with one always allowed, `ALLOW_MASS_DELETE`
 override, and the empty-group guard stops a misspelled group from draining the base path.
 
 Specific to this kind: the project list is a hard dependency and its absence aborts the
-run; OIDC-asserted group memberships are never removed; groups without the marker are never
-deleted; and a `users` job and a `projects` job may share an Origin because collection
+run; OIDC-asserted group memberships are never removed; a project group someone other than
+the provisioner's account controls is replaced, under the deletion ceiling; and a `users` job and a `projects` job may share an Origin because collection
 metadata carries the job kind as well as the group, so neither recognizes the other's
 leftovers as its own. Jobs still may not share or nest base paths.
 

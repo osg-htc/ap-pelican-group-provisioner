@@ -291,8 +291,14 @@ component of its namespace. That is the directory the user's data actually lives
 the access point, and Pelican's namespace cleaner accepts `aaronp..wemhoff` because only a
 path component that is exactly `..` is treated as traversal. The collection's metadata
 records both spellings.
-Collection names are not documented as validated the same way, but since the name is the
-username the same rule applies in practice.
+
+Pelican does not validate collection names, and it path-cleans the namespace before checking
+it is inside an export, so a raw value of `m/../victim` would land on victim's prefix and
+`x/../../..` on the export root. The raw value must therefore be a single path segment: it
+may contain dots, but not `/`, must not be exactly `.` or `..`, and must not contain
+whitespace, control characters or `:` (which Pelican refuses in a namespace). A member whose
+value breaks this is reported and skipped, and gets no Pelican user. The projects job applies
+the same rule to project names.
 
 ## Algorithm
 
@@ -397,8 +403,13 @@ first run against a new Origin.
   configured namespace are ever deleted.
 - **Partial failures.** Per-user errors are collected and reported at the end rather than
   aborting the run, so one bad LDAP entry does not block everyone else.
-- **Retries.** HTTP calls to the Origin retry on connection errors and 5xx responses with
-  exponential backoff, three attempts. 4xx responses are not retried.
+- **Retries.** Reads and deletes retry on transport errors and 5xx responses with
+  exponential backoff, three attempts; a delete that returns 404 on a retry counts as done.
+  Creates (POST) retry only when the connection could not be made, because after a timeout
+  or a 5xx the Origin may already have created the object and a retry would duplicate it.
+  4xx responses are never retried.
+- **Exit code on a crash.** An unexpected exception exits 2 like any other hard error, not
+  Python's default 1, which would read as "some users failed".
 - **Timeouts.** LDAP and HTTP operations carry explicit timeouts so a hung service cannot
   wedge the scheduled job.
 - **Secrets in logs.** The bind password and API token are never logged. Log formatting

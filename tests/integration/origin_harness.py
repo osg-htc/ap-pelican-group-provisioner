@@ -269,7 +269,8 @@ class Scenario:
 
     def cleanup(self) -> None:
         for c in self.admin.list_collections():
-            if c.namespace.startswith(f"{NAMESPACE}/it-{self.rid}/"):
+            # By name too, in case a test's collection landed outside the scenario's paths.
+            if c.namespace.startswith(f"{NAMESPACE}/it-{self.rid}/") or self.rid in c.name:
                 _quietly(self.admin.delete_collection, c.id)
         for g in self.admin.list_groups():
             if self.rid in g.name:

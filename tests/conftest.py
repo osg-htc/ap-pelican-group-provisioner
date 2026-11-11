@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from provisioner.config import Job, LdapSettings, PelicanSettings, RunSettings, Settings
@@ -19,6 +21,7 @@ PROJECTS_BASE = "/ospool/projects"
 PROJECTS_GROUP = "CO:members:active"
 PROJECTS_URL = "https://topology.example.org/miscproject/json"
 DESCRIPTION = "AUTOMATED: Do not manually edit this group."
+ADMIN_ID = "admin-id"   # the account the provisioner runs as (GET /me)
 
 
 def make_settings(**overrides) -> Settings:
@@ -100,10 +103,13 @@ class FakePelican:
         self.metadata[c.id] = {"provisioner.source": "ldap", "provisioner.group": group} if group else {}
         return c
 
-    def add_group(self, name: str, members: list[str] = (), description: str = "", source: str = "oidc") -> PelicanGroup:
-        """Arrange a group. Default source 'oidc' mimics a group Pelican asserted from a login claim."""
+    def add_group(self, name: str, members: list[str] = (), description: str = "", source: str = "oidc",
+                  owner_id: str = ADMIN_ID, admin_id: str = "", admin_type: str = "") -> PelicanGroup:
+        """Arrange a group. Default source 'oidc' mimics a group Pelican asserted from a login
+        claim, which Pelican gives to the built-in admin, here the provisioner's account."""
         g = PelicanGroup(id=self._id("g"), name=name, description=description,
-                         members=tuple(GroupMember(user_id=m, source=source) for m in members))
+                         members=tuple(GroupMember(user_id=m, source=source) for m in members),
+                         owner_id=owner_id, admin_id=admin_id, admin_type=admin_type)
         self.groups[g.id] = g
         return g
 
@@ -111,10 +117,14 @@ class FakePelican:
         return next((g for g in self.groups.values() if g.name == name), None)
 
     def writes(self) -> list[tuple]:
-        reads = {"list_users", "list_collections", "list_acls", "get_collection_metadata", "list_groups"}
+        reads = {"get_me", "list_users", "list_collections", "list_acls", "get_collection_metadata", "list_groups"}
         return [c for c in self.calls if c[0] not in reads]
 
     # OriginApi
+    def get_me(self) -> PelicanUser:
+        self.calls.append(("get_me",))
+        return PelicanUser(id=ADMIN_ID, username="admin", sub="admin", issuer="https://origin.example.org")
+
     def list_users(self) -> list[PelicanUser]:
         self.calls.append(("list_users",))
         return list(self.users.values())
@@ -168,7 +178,7 @@ class FakePelican:
         self.calls.append(("create_group", name, display_name, description))
         if self.group_named(name) is not None:
             raise PelicanError("group exists", status=400)
-        g = PelicanGroup(id=self._id("g"), name=name, description=description)
+        g = PelicanGroup(id=self._id("g"), name=name, description=description, owner_id=ADMIN_ID, source="pelican")
         self.groups[g.id] = g
         return g
 
@@ -181,14 +191,12 @@ class FakePelican:
         g = self.groups[group_id]
         if any(m.user_id == user_id for m in g.members):
             raise PelicanError("already a member", status=400)
-        self.groups[group_id] = PelicanGroup(id=g.id, name=g.name, description=g.description,
-                                             members=g.members + (GroupMember(user_id=user_id, source="api"),))
+        self.groups[group_id] = replace(g, members=g.members + (GroupMember(user_id=user_id, source="pelican"),))
 
     def remove_group_member(self, group_id, user_id) -> None:
         self.calls.append(("remove_group_member", group_id, user_id))
         g = self.groups[group_id]
-        self.groups[group_id] = PelicanGroup(id=g.id, name=g.name, description=g.description,
-                                             members=tuple(m for m in g.members if m.user_id != user_id))
+        self.groups[group_id] = replace(g, members=tuple(m for m in g.members if m.user_id != user_id))
 
 
 def acl(subject_id: str, role: str = "write", subject_type: str = "user") -> CollectionAcl:

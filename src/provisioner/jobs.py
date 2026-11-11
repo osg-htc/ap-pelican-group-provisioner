@@ -13,6 +13,7 @@ import sys
 from provisioner.collections import CollectionReconciler, Grant
 from provisioner.config import ConfigError, Job, Settings, load_settings
 from provisioner.groups import GroupProvisioner
+from provisioner.identifiers import path_segment_problem
 from provisioner.ldap_client import LdapClient, LdapError, LdapPerson
 from provisioner.logging_setup import setup_logging
 from provisioner.pelican_client import PelicanClient, PelicanError, PelicanUser
@@ -71,6 +72,12 @@ class JobRunner:
         """One personal collection per member, granted to the member's own user."""
         existing_users = self._existing_users()
         desired = self._users.desired_users(self._members(), existing_users)
+        # The raw LDAP value becomes a path under the base path, so it must be one segment.
+        for username, u in list(desired.items()):
+            if problem := path_segment_problem(u.ldap_name):
+                attr = self._settings.ldap.username_attribute
+                self.report.error(f"{attr}={u.ldap_name!r} {problem}; cannot name a collection, skipped")
+                del desired[username]
         self._refuse_if_empty("usable members", len(desired))
         log.info("Desired users: %d", len(desired))
 
@@ -99,14 +106,21 @@ class JobRunner:
         for u in desired.values():
             for project in u.groups & project_names.keys():
                 wanted.setdefault(project, set()).add(u.username)
+        for project in sorted(wanted):
+            if problem := path_segment_problem(project):
+                self.report.error(f"project {project!r} {problem}; cannot name a collection, skipped")
+                del wanted[project]
         self._refuse_if_empty("project members", len(wanted))
         log.info("Projects with members: %d; members in projects: %d of %d", len(wanted), len(desired), len(members))
 
+        # Every check that can refuse the run happens before the first write.
         plan = self._collections.plan(set(wanted))
+        existing_groups = self._groups.list_groups()
+        me = self._groups.my_user_id()
+        self._groups.plan_replacements(set(wanted), existing_groups, me, self._settings.run)
+
         user_ids = self._users.ensure_users(desired, existing_users)
         member_ids = {project: {user_ids[n] for n in names if n in user_ids} for project, names in wanted.items()}
-
-        existing_groups = self._groups.list_groups()
         group_ids = self._groups.ensure_groups(member_ids, project_names, existing_groups)
 
         grants = {project: Grant("group", gid) for project, gid in group_ids.items()}
@@ -137,6 +151,10 @@ def main() -> None:
             total.merge(report)
     except HardError as exc:
         log.error("Hard error, run aborted: %s", exc)
+        sys.exit(EXIT_HARD)
+    except Exception:
+        # Without this an unexpected exception exits 1, the code for "some users failed".
+        log.exception("Unexpected error, run aborted")
         sys.exit(EXIT_HARD)
     finally:
         ldap.close()

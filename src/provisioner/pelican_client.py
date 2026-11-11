@@ -16,6 +16,9 @@ log = logging.getLogger(__name__)
 API_PREFIX = "/api/v1.0"
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 0.5
+IDEMPOTENT_METHODS = frozenset({"GET", "DELETE"})
+# Transport errors raised before any byte of the request reached the server.
+NOT_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 
 
 class PelicanError(Exception):
@@ -67,6 +70,12 @@ class PelicanGroup:
     name: str
     description: str = ""
     members: tuple[GroupMember, ...] = ()
+    # Who besides system admins can change the membership: the owner, and the group admin
+    # (a user, or every member of another group, by admin_type).
+    owner_id: str = ""
+    admin_id: str = ""
+    admin_type: str = ""
+    source: str = ""          # "pelican" when made through the API, else the provider that asserts it
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> PelicanGroup:
@@ -74,7 +83,9 @@ class PelicanGroup:
             GroupMember(user_id=str(m["userId"]), source=m.get("source") or "")
             for m in data.get("members") or [] if m.get("userId")
         )
-        return cls(id=str(data["id"]), name=data.get("name", ""), description=data.get("description") or "", members=members)
+        return cls(id=str(data["id"]), name=data.get("name", ""), description=data.get("description") or "",
+                   members=members, owner_id=str(data.get("ownerId") or ""), admin_id=str(data.get("adminId") or ""),
+                   admin_type=data.get("adminType") or "", source=data.get("source") or "")
 
 
 @dataclass(frozen=True)
@@ -106,7 +117,8 @@ class PelicanClient:
       every route this script uses.
     """
 
-    def __init__(self, settings: PelicanSettings) -> None:
+    def __init__(self, settings: PelicanSettings, transport: httpx.BaseTransport | None = None) -> None:
+        """`transport` replaces the network, for tests."""
         self._settings = settings
         if not settings.verify_tls:
             log.warning("PELICAN_VERIFY_TLS=false: not verifying the Origin's TLS certificate")
@@ -115,6 +127,7 @@ class PelicanClient:
             headers={"Accept": "application/json"},
             verify=False if not settings.verify_tls else (settings.ca_bundle or True),
             timeout=settings.timeout_seconds,
+            transport=transport,
         )
         self._authenticated = False
 
@@ -154,19 +167,31 @@ class PelicanClient:
     # -- transport -----------------------------------------------------------------
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        """Send one request, retrying transport errors and 5xx responses with backoff.
-        4xx responses are not retried and raise immediately."""
+        """Send one request, retrying with backoff where that cannot repeat a change.
+
+        GET and DELETE are retried on transport errors and 5xx responses. A POST is retried
+        only when the request never reached the server (connection failed); after a timeout
+        or a 5xx the Origin may already have created the object, and a retry would create it
+        twice. A DELETE that returns 404 on a retry counts as done, since the earlier attempt
+        removed it. 4xx responses are never retried.
+        """
         self.authenticate()
+        idempotent = method in IDEMPOTENT_METHODS
         last_error: PelicanError | None = None
         for attempt in range(1, RETRY_ATTEMPTS + 1):
             try:
                 response = self._client.request(method, path, **kwargs)
             except httpx.TransportError as exc:
                 last_error = PelicanError(f"{method} {path} failed: {exc}")
+                if not idempotent and not isinstance(exc, NOT_SENT_ERRORS):
+                    raise last_error from exc
             else:
                 if response.status_code < 400:
                     return response
-                if response.status_code < 500:
+                if method == "DELETE" and response.status_code == 404 and attempt > 1:
+                    log.info("%s %s returned 404 on retry; the earlier attempt deleted it", method, path)
+                    return response
+                if response.status_code < 500 or not idempotent:
                     raise _http_error(method, path, response)
                 last_error = _http_error(method, path, response)
             log.warning("%s (attempt %d of %d)", last_error, attempt, RETRY_ATTEMPTS)
@@ -176,6 +201,10 @@ class PelicanClient:
         raise last_error
 
     # -- users ---------------------------------------------------------------------
+
+    def get_me(self) -> PelicanUser:
+        """The account this client is authenticated as."""
+        return PelicanUser.from_api(self._request("GET", "/me").json())
 
     def list_users(self) -> list[PelicanUser]:
         response = self._request("GET", "/users")

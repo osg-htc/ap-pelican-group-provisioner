@@ -63,6 +63,19 @@ class CollectionReconciler:
     def is_correct(self, c: PelicanCollection) -> bool:
         return c.namespace.rstrip("/") == self.namespace_for(c.name)
 
+    def under_another_job(self, c: PelicanCollection) -> bool:
+        """Inside another configured job's base path, which that job owns. Checked before the
+        metadata lookup so each run does not fetch the metadata of every collection another
+        job made (one request per personal collection otherwise)."""
+        ns = c.namespace.rstrip("/")
+        for job in self._settings.jobs:
+            base = job.base_path.rstrip("/")
+            if base == self.base_path:   # this job (base paths are disjoint across jobs)
+                continue
+            if ns == base or ns.startswith(base + "/"):
+                return True
+        return False
+
     def belongs_to_job(self, c: PelicanCollection) -> bool:
         """Confirm via metadata that this job created the collection. Used only for marked
         collections found outside the base path, i.e. after a base path change."""
@@ -99,7 +112,7 @@ class CollectionReconciler:
                     deletions.append((c, f"wrong namespace {c.namespace}"))
                 else:
                     deletions.append((c, "no longer wanted"))
-            elif self.is_marked(c) and self.belongs_to_job(c):
+            elif self.is_marked(c) and not self.under_another_job(c) and self.belongs_to_job(c):
                 in_scope += 1
                 deletions.append((c, f"left at old base path {c.namespace}"))
 

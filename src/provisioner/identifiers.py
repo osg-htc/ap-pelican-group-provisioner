@@ -37,6 +37,27 @@ def sanitize_identifier(value: str) -> str:
     return out if is_valid_identifier(out) else ""
 
 
+def path_segment_problem(value: str) -> str | None:
+    """Why `value` cannot be the last component of a collection namespace, or None if it can.
+
+    Collection names come from LDAP and the Topology feed and are appended to the job's base
+    path. Pelican path-cleans the namespace before storing it and only checks that the result
+    is inside an export, so "a/../b" or ".." would land on someone else's prefix or the export
+    root. Dots inside a name ("first.last", "a..b") are fine: only whole "." and ".." segments
+    move a path. Whitespace, control characters and ':' are rejected because Pelican refuses
+    them in a namespace (database.CleanNamespacePath).
+    """
+    if not value:
+        return "is empty"
+    if "/" in value:
+        return "contains '/'"
+    if value in (".", ".."):
+        return "is a relative path component"
+    if any(ch.isspace() or not ch.isprintable() or ch == ":" for ch in value):
+        return "contains whitespace, a control character or ':'"
+    return None
+
+
 def with_suffix(base: str, n: int) -> str:
     """base + n, trimmed so the result still fits Pelican's 64-character limit."""
     suffix = str(n)

@@ -466,3 +466,45 @@ def test_with_suffix_respects_length_limit():
     assert with_suffix(base, 7) == "a" * 63 + "7"
     assert with_suffix(base, 12) == "a" * 62 + "12"
     assert len(with_suffix(base, 123)) == 64
+
+
+# -- names that would move the collection path ------------------------------------------
+
+@pytest.mark.parametrize("raw", [
+    "mallory/../victim",   # lands on another member's prefix
+    "victim/sub",          # nests inside another member's prefix
+    "x/../../..",          # path-cleans to the export root
+    "has space",
+    "a:b",
+])
+def test_ldap_value_that_is_not_one_path_segment_gets_nothing(pelican, raw):
+    report = run(pelican, [person(raw), person("victim")])
+
+    assert report.exit_code == EXIT_PARTIAL
+    assert any(repr(raw) in e and "cannot name a collection" in e for e in report.errors)
+    assert collection_names(pelican) == ["victim"]
+    assert all(c.namespace == f"{BASE_PATH}/{c.name}" for c in pelican.collections.values())
+    created = [c[1] for c in pelican.calls if c[0] == "create_user"]
+    assert created == ["victim"]          # no Pelican user for the skipped member either
+
+
+@pytest.mark.parametrize("raw", ["first.last", "aaronp..wemhoff", "v1.2.3", "a.b@c-d"])
+def test_dots_in_ldap_value_are_allowed(pelican, raw):
+    report = run(pelican, [person(raw)])
+
+    assert report.exit_code == EXIT_OK
+    (c,) = pelican.collections.values()
+    assert c.name == raw and c.namespace == f"{BASE_PATH}/{raw}"
+
+
+def test_collection_that_escaped_the_base_path_is_removed(pelican):
+    """Left behind by a version without the path check: marked, ours by metadata, and at
+    the export root. The member is now skipped and the collection deleted."""
+    escaped = pelican.add_collection("x/../../..", namespace="/ospool")
+    pelican.add_user("victim")
+
+    report = run(pelican, [person("x/../../.."), person("victim")])
+
+    assert escaped.id not in pelican.collections
+    assert report.collections_deleted == 1
+    assert collection_names(pelican) == ["victim"]

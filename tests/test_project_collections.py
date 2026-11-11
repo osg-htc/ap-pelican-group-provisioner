@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from provisioner import jobs as jobs_module
@@ -9,6 +11,7 @@ from provisioner.pelican_client import GroupMember, PelicanError, PelicanGroup
 from provisioner.report import EXIT_OK, EXIT_PARTIAL, HardError
 
 from conftest import (
+    ADMIN_ID,
     DESCRIPTION,
     PROJECTS_BASE,
     PROJECTS_GROUP,
@@ -111,11 +114,8 @@ def test_membership_is_reconciled_but_oidc_rows_are_kept(pelican):
     alice = pelican.add_user("alice"); bob = pelican.add_user("bob"); zed = pelican.add_user("zed")
     # bob was added by an earlier run (api-sourced) but has left the project; zed's row was
     # asserted by Pelican from a login claim (oidc-sourced) and is not in the LDAP project.
-    group = pelican.add_group("ACE_NIAID", members=[bob.id], description=DESCRIPTION, source="api")
-    pelican.groups[group.id] = PelicanGroup(
-        id=group.id, name=group.name, description=group.description,
-        members=group.members + (GroupMember(user_id=zed.id, source="oidc"),),
-    )
+    group = pelican.add_group("ACE_NIAID", members=[bob.id], description=DESCRIPTION, source="pelican")
+    pelican.groups[group.id] = replace(group, members=group.members + (GroupMember(user_id=zed.id, source="oidc"),))
 
     report = run(pelican, [ALICE])
 
@@ -198,3 +198,137 @@ def test_group_create_failure_leaves_project_for_next_run(pelican):
 def test_projects_job_requires_url():
     with pytest.raises(ValueError, match="projects_url"):
         Job(kind="projects", group="g", base_path="/p")
+
+
+@pytest.mark.parametrize("bad", ["ACE_NIAID/../EvolSims", "..", "Two Words"])
+def test_project_name_that_is_not_one_path_segment_is_skipped(pelican, project_feed, bad):
+    project_feed["names"][bad] = bad
+    member = person("dave", groups=["CO:members:active", bad, "EvolSims"])
+
+    report = run(pelican, [member])
+
+    assert report.exit_code == EXIT_PARTIAL
+    assert any(repr(bad) in e and "cannot name a collection" in e for e in report.errors)
+    assert names(pelican) == ["EvolSims"]
+    assert pelican.group_named(bad) is None
+
+
+def test_dotted_project_name_is_allowed(pelican, project_feed):
+    project_feed["names"]["Lab.v2"] = "Lab v2"
+    report = run(pelican, [person("dave", groups=["CO:members:active", "Lab.v2"])])
+
+    assert report.exit_code == EXIT_OK
+    assert names(pelican) == ["Lab.v2"]
+
+
+def test_other_jobs_collections_cost_no_metadata_requests(pelican):
+    """With both jobs configured, neither reads the metadata of collections under the
+    other's base path: that was one request per personal collection on every run."""
+    from conftest import BASE_PATH, GROUP
+
+    users_job = Job(kind="users", group=GROUP, base_path=BASE_PATH)
+    settings = make_settings(jobs=[users_job, projects_job()])
+    ldap = FakeLdap({GROUP: [person(n) for n in ("u1", "u2", "u3")], PROJECTS_GROUP: [ALICE, BOB]})
+    for job in settings.jobs:
+        JobRunner(ldap, pelican, settings, job).run()
+    pelican.calls.clear()
+
+    for job in settings.jobs:
+        report = JobRunner(ldap, pelican, settings, job).run()
+        assert report.collections_deleted == 0 and report.collections_created == 0
+
+    assert [c for c in pelican.calls if c[0] == "get_collection_metadata"] == []
+
+
+def test_leftover_outside_every_base_path_is_still_checked(pelican):
+    """Skipping other jobs' base paths must not stop a moved base path from being cleaned."""
+    old = pelican.add_collection("ACE_NIAID", namespace="/ospool/old-projects/ACE_NIAID", group=PROJECTS_GROUP)
+    pelican.metadata[old.id]["provisioner.kind"] = "projects"
+
+    report = run(pelican, [ALICE], allow_mass_delete=True)
+
+    assert old.id not in pelican.collections
+    assert report.collections_deleted == 1
+
+
+# -- groups someone else controls are replaced ----------------------------------------------
+
+
+@pytest.mark.parametrize("control", [
+    {"owner_id": "u-mallory"},                                          # another owner
+    {"owner_id": ""},                                                   # ownerless
+    {"admin_id": "u-mallory", "admin_type": "user"},                    # another user as group admin
+    {"admin_id": "g-friends", "admin_type": "group"},                   # a group's members as admin
+], ids=["other-owner", "no-owner", "user-admin", "group-admin"])
+def test_group_someone_else_controls_is_deleted_and_recreated(pelican, control):
+    alice = pelican.add_user("alice")
+    stomped = pelican.add_group("ACE_NIAID", members=[alice.id, "u-mallory"], source="pelican", **control)
+    old_collection = pelican.add_collection("ACE_NIAID", namespace=f"{PROJECTS_BASE}/ACE_NIAID", group=PROJECTS_GROUP)
+    pelican.acls[old_collection.id].append(acl(stomped.id, subject_type="group"))
+
+    report = run(pelican, [ALICE])
+
+    assert stomped.id not in pelican.groups
+    new = pelican.group_named("ACE_NIAID")
+    assert new.owner_id == ADMIN_ID and new.admin_id == "" and new.description == DESCRIPTION
+    assert {m.user_id for m in new.members} == {alice.id}
+    assert acl(new.id, subject_type="group") in pelican.acls[old_collection.id]
+    assert report.groups_replaced == 1 and report.groups_created == 1
+    assert report.exit_code == EXIT_OK
+
+
+def test_group_the_provisioner_controls_is_kept(pelican):
+    """Unmarked but owned by the provisioner's account (e.g. asserted from OIDC, which
+    Pelican gives to the built-in admin), and the provisioner as its user admin: adopted."""
+    group = pelican.add_group("ACE_NIAID", admin_id=ADMIN_ID, admin_type="user")
+    report = run(pelican, [ALICE])
+    assert pelican.group_named("ACE_NIAID").id == group.id
+    assert report.groups_replaced == 0
+
+
+def test_replacement_is_planned_before_any_write(pelican):
+    """Too many groups to replace (likely the provisioner's own account changed): refused
+    before any user, group or collection is touched."""
+    for name in ("ACE_NIAID", "EvolSims"):
+        pelican.add_group(name, owner_id="u-previous-admin", source="pelican", description=DESCRIPTION)
+
+    with pytest.raises(HardError, match="refusing to replace 2 of 2 project groups"):
+        run(pelican, [ALICE, BOB])
+    assert pelican.writes() == []
+
+    report = run(pelican, [ALICE, BOB], allow_mass_delete=True)
+    assert report.groups_replaced == 2
+
+
+def test_failed_delete_never_grants_to_the_foreign_group(pelican):
+    stomped = pelican.add_group("ACE_NIAID", owner_id="u-mallory", source="pelican")
+    original = pelican.delete_group
+
+    def refuse(group_id):
+        if group_id == stomped.id:
+            raise PelicanError("forbidden", status=403)
+        original(group_id)
+
+    pelican.delete_group = refuse
+    report = run(pelican, [ALICE, BOB])
+
+    assert any(e.startswith(f"delete group ACE_NIAID ({stomped.id}) for replacement") for e in report.errors)
+    assert names(pelican) == ["EvolSims"]                       # no collection for ACE_NIAID this run
+    assert not any(c[0] == "add_group_member" and c[1] == stomped.id for c in pelican.calls)
+
+
+def test_dry_run_reports_replacement_without_writing(pelican):
+    pelican.add_group("ACE_NIAID", owner_id="u-mallory", source="pelican")
+    report = run(pelican, [ALICE], dry_run=True)
+    assert pelican.writes() == []
+    assert report.groups_replaced == 1
+
+
+def test_unknown_own_account_is_a_hard_error(pelican):
+    def broken():
+        raise PelicanError("GET /me returned 500", status=500)
+
+    pelican.get_me = broken
+    with pytest.raises(HardError, match="own Pelican account"):
+        run(pelican, [ALICE])
+    assert pelican.writes() == []

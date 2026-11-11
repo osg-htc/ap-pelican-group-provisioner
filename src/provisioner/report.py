@@ -22,6 +22,7 @@ class SyncReport:
     users_existing: int = 0
     groups_created: int = 0
     groups_deleted: int = 0
+    groups_replaced: int = 0    # deleted because someone else controlled them, then recreated
     members_added: int = 0
     members_removed: int = 0
     collections_created: int = 0

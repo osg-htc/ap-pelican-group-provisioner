@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import math
 
-from provisioner.config import PelicanSettings
+from provisioner.config import PelicanSettings, RunSettings
 from provisioner.pelican_client import PelicanError, PelicanGroup
 from provisioner.report import HardError, SyncReport
 
@@ -13,15 +14,22 @@ log = logging.getLogger(__name__)
 
 class GroupProvisioner:
     """Groups are matched by name. A group that already exists, including one Pelican
-    created from an OIDC claim, is reused as-is; only its membership is reconciled. Members
-    Pelican asserted from a login claim (source "oidc") are never removed, since Pelican
-    re-asserts them on the next login and both sides read the same directory anyway."""
+    created from an OIDC claim, is reused if the provisioner's own account controls it;
+    only its membership is reconciled. Members Pelican asserted from a login claim (source
+    "oidc") are never removed, since Pelican re-asserts them on the next login and both
+    sides read the same directory anyway.
+
+    A project group that anyone else can manage (owned by another account, or with another
+    user or group as its group admin) is deleted and recreated. Its owner or admin could
+    otherwise add people between runs, and they would get the project's collection.
+    """
 
     def __init__(self, pelican, settings: PelicanSettings, report: SyncReport, dry_run: bool) -> None:
         self._pelican = pelican
         self._marker = settings.collection_description
         self.report = report
         self._dry_run = dry_run
+        self._replace: set[str] = set()
 
     def list_groups(self) -> dict[str, PelicanGroup]:
         try:
@@ -36,12 +44,64 @@ class GroupProvisioner:
             by_name[g.name] = g
         return by_name
 
+    def my_user_id(self) -> str:
+        try:
+            me = self._pelican.get_me()
+        except PelicanError as exc:
+            raise HardError(f"Could not identify the provisioner's own Pelican account (GET /me): {exc}") from exc
+        if not me.id:
+            raise HardError("GET /me returned no user id")
+        return me.id
+
+    @staticmethod
+    def who_else_controls(group: PelicanGroup, me: str) -> str | None:
+        """Why someone other than `me` (or a system admin) can change this group's
+        membership, or None when only `me` can."""
+        if group.owner_id != me:
+            return f"owned by {group.owner_id or 'nobody'}"
+        if group.admin_id and not (group.admin_type == "user" and group.admin_id == me):
+            return f"group admin is {group.admin_type or 'user'} {group.admin_id}"
+        return None
+
+    def plan_replacements(self, wanted: set[str], existing: dict[str, PelicanGroup], me: str,
+                          run: RunSettings) -> None:
+        """Decide which project groups must be replaced, and refuse too many at once. Read-only.
+
+        Replacing changes the group's ID and briefly removes the project's grant, so it gets
+        the same ceiling as collection deletions. The likely cause of a mass replacement is
+        not a takeover but the provisioner running as a different account than before.
+        """
+        self._replace = set()
+        in_use = sorted(name for name in wanted if name in existing)
+        for name in in_use:
+            why = self.who_else_controls(existing[name], me)
+            if why is not None:
+                log.warning("Group %s (id=%s) is %s; it will be deleted and recreated", name, existing[name].id, why)
+                self._replace.add(name)
+        if not self._replace:
+            return
+        allowed = max(1, math.floor(run.max_delete_fraction * len(in_use)))
+        if len(self._replace) <= allowed:
+            return
+        message = (f"refusing to replace {len(self._replace)} of {len(in_use)} project groups not controlled by "
+                   f"the provisioner's account {me} (ceiling {allowed}, {run.max_delete_fraction:.0%})")
+        if run.allow_mass_delete:
+            log.warning("%s; proceeding because ALLOW_MASS_DELETE is set", message)
+            return
+        raise HardError(message + ". Check the account the provisioner runs as; set ALLOW_MASS_DELETE=true "
+                                  "for one run if this is intended.")
+
     def ensure_groups(self, wanted: dict[str, set[str]], display_names: dict[str, str],
                       existing: dict[str, PelicanGroup]) -> dict[str, str]:
-        """Create missing groups and reconcile membership. Returns name -> group id."""
+        """Replace groups plan_replacements flagged, create missing groups and reconcile
+        membership. Returns name -> group id."""
         group_ids: dict[str, str] = {}
         for name in sorted(wanted):
             group = existing.get(name)
+            if group is not None and name in self._replace:
+                if not self._delete_for_replacement(name, group):
+                    continue          # never grant to a group someone else controls
+                group = None
             if group is None:
                 group_id = self._create_group(name, display_names.get(name, name))
                 if group_id is None:
@@ -71,6 +131,20 @@ class GroupProvisioner:
                 continue
             log.info("Deleted group %s (id=%s): project no longer present", name, group.id)
             self.report.groups_deleted += 1
+
+    def _delete_for_replacement(self, name: str, group: PelicanGroup) -> bool:
+        if self._dry_run:
+            log.info("DRY RUN: would delete group %s (id=%s) to recreate it", name, group.id)
+            self.report.groups_replaced += 1
+            return True
+        try:
+            self._pelican.delete_group(group.id)
+        except PelicanError as exc:
+            self.report.error(f"delete group {name} ({group.id}) for replacement: {exc}; project skipped")
+            return False
+        log.info("Deleted group %s (id=%s) to recreate it under the provisioner's account", name, group.id)
+        self.report.groups_replaced += 1
+        return True
 
     def _create_group(self, name: str, display_name: str) -> str | None:
         if self._dry_run:

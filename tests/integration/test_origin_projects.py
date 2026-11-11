@@ -13,7 +13,7 @@ import pytest
 
 from provisioner.report import EXIT_OK, EXIT_PARTIAL, HardError
 
-from origin_harness import admin, admin_token, make_scenario, pelican_settings, scenario  # noqa: F401  (fixtures)
+from origin_harness import SimulatedCrash, admin, admin_token, make_scenario, pelican_settings, scenario  # noqa: F401  (fixtures)
 
 pytestmark = pytest.mark.origin
 
@@ -491,3 +491,113 @@ def test_collection_made_by_hand_under_the_base_path_is_removed(scenario, admin)
     scenario.sync()
 
     assert set(scenario.collections()) == {"ACE"}
+
+
+# -- groups someone else controls ----------------------------------------------------------
+
+
+def hand_over(admin, group_id: str, **ownership: str) -> None:
+    """Give a group's ownership or group-admin role to someone else, as a system admin can."""
+    admin._request("PUT", f"/groups/{group_id}/ownership", json=ownership)
+
+
+def stranger(scenario, admin):
+    return admin.create_user(f"stranger-{scenario.rid}", None, f"http://other.example/{scenario.rid}",
+                             "https://cilogon.org")
+
+
+@pytest.mark.parametrize("role", ["owner", "user-admin", "group-admin"])
+def test_group_someone_else_controls_is_replaced(scenario, admin, role):
+    """Whoever owns or administers a project group could add people to it between runs and
+    so to the project's collection. Such a group is deleted and recreated under the
+    provisioner's account, and the collection is granted to the new group only."""
+    scenario.projects("ACE")
+    scenario.member("alice", "ACE")
+    scenario.sync()
+    old = scenario.groups()["ACE"]
+    other = stranger(scenario, admin)
+    if role == "owner":
+        hand_over(admin, old.id, ownerId=other.id)
+    elif role == "user-admin":
+        hand_over(admin, old.id, adminId=other.id, adminType="user")
+    else:
+        friends = admin.create_group(f"friends_{scenario.rid}", "Friends", "theirs")
+        hand_over(admin, old.id, adminId=friends.id, adminType="group")
+    admin.add_group_member(old.id, other.id)        # what the new controller would do
+
+    report = scenario.sync()
+
+    assert report.exit_code == EXIT_OK, report.errors
+    assert report.groups_replaced == 1
+    new = scenario.groups()["ACE"]
+    me = admin.get_me().id
+    assert new.id != old.id and new.owner_id == me and new.admin_id == ""
+    assert new.description == scenario.pelican_settings.collection_description
+    assert scenario.access() == {"ACE": {"alice"}}
+    assert scenario.acl_count("ACE") == 1
+    assert_converged(scenario)
+
+
+def test_too_many_groups_to_replace_is_refused_before_any_change(scenario, admin):
+    """Every group suddenly 'foreign' most likely means the provisioner is running as a
+    different account, not a takeover. Nothing is touched until the operator says so."""
+    scenario.projects("ACE", "Evol")
+    scenario.member("alice", "ACE", "Evol")
+    scenario.sync()
+    other = stranger(scenario, admin)
+    before = scenario.groups()
+    for g in before.values():
+        hand_over(admin, g.id, ownerId=other.id)
+
+    with pytest.raises(HardError, match="refusing to replace 2 of 2 project groups"):
+        scenario.sync()
+    assert scenario.last_writes == []
+    assert {k: g.id for k, g in scenario.groups().items()} == {k: g.id for k, g in before.items()}
+
+    report = scenario.sync(allow_mass_delete=True)
+    assert report.groups_replaced == 2
+    assert scenario.access() == {"ACE": {"alice"}, "Evol": {"alice"}}
+
+
+def test_crash_between_delete_and_recreate_is_safe(scenario, admin):
+    """The run dies after deleting the foreign group: the project has no access at all until
+    the next run, never the foreign controller's, and the next run recreates it."""
+    scenario.projects("ACE")
+    scenario.member("alice", "ACE")
+    scenario.sync()
+    other = stranger(scenario, admin)
+    hand_over(admin, scenario.groups()["ACE"].id, ownerId=other.id)
+    admin.add_group_member(scenario.groups()["ACE"].id, other.id)
+
+    with pytest.raises(SimulatedCrash):
+        scenario.sync(crash_before=1)
+    assert [w[0] for w in scenario.last_writes] == ["delete_group"]
+    assert scenario.access() == {"ACE": set()}
+
+    report = scenario.sync()
+    assert report.groups_created == 1 and report.groups_replaced == 0
+    assert scenario.access() == {"ACE": {"alice"}}
+    assert scenario.groups()["ACE"].owner_id == admin.get_me().id
+
+
+def test_placeholder_sub_replaced_by_real_one_moves_project_access(scenario):
+    """A bulk-imported member had uid "dummy-text-for-provisioning-<username>" until COManage
+    recorded their real CILogon ID. When it arrives, the account with the real identity takes
+    the placeholder account's place in every project group; collections and groups keep
+    their IDs and nothing is deleted."""
+    scenario.projects("ACE", "Evol")
+    scenario.member("alice", "ACE", "Evol", sub=f"dummy-text-for-provisioning-{scenario.username('alice')}")
+    scenario.member("bob", "ACE")
+    scenario.sync()
+    ids_before = ({k: c.id for k, c in scenario.collections().items()}, {k: g.id for k, g in scenario.groups().items()})
+
+    scenario.member("alice", "ACE", "Evol")
+    report = scenario.sync()
+
+    assert report.exit_code == EXIT_OK, report.errors
+    assert report.users_created == 1 and report.members_added == 2 and report.members_removed == 2
+    assert report.collections_deleted == 0 and report.groups_replaced == 0
+    assert ({k: c.id for k, c in scenario.collections().items()}, {k: g.id for k, g in scenario.groups().items()}) == ids_before
+    alice = f"{scenario.username('alice')}2"
+    assert scenario.access() == {"ACE": {alice, "bob"}, "Evol": {alice}}   # placeholder account is out
+    assert_converged(scenario)
