@@ -1,0 +1,21 @@
+# A standalone Origin for the integration tests: no Director, no Registry, no federation.
+# Only the web API (users, groups, collections) is exercised. State lives in the container's
+# own SQLite database and is discarded with the container.
+Logging:
+  Level: info
+Server:
+  Hostname: localhost
+  WebPort: 18444
+  ExternalWebUrl: https://localhost:18444
+  # Disable the Acceptable Use Policy gate. With it on, /users and /groups answer 403 to the
+  # admin token until an AUP is accepted.
+  AUPFile: none
+Origin:
+  EnableStandaloneMode: true
+  StorageType: posixv2          # standalone mode needs a native (v2) storage backend
+  EnableIssuer: true
+  IssuerMode: embedded
+  Exports:
+    - FederationPrefix: /test
+      StoragePrefix: /data/test
+      Capabilities: ["Reads", "Writes", "Listings"]
