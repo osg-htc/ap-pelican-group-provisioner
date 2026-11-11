@@ -117,8 +117,13 @@ jobs:
     projects_url: https://topology.opensciencegrid.org/miscproject/json
 ```
 
-`kind` defaults to `users`; `projects_url` is required for `projects`. Everything else is
-shared with the users job and documented in user-collections.
+`kind` is required on every job, `users` or `projects`; `projects_url` is required for
+`projects`. Everything else is shared with the users job and documented in user-collections.
+
+At most one `projects` job is allowed per Origin, and configuration loading rejects a second.
+Orphaned-group cleanup deletes every marked group that is not one of the running job's
+projects, so a second projects job would delete the first one's groups on every run and
+leave its collections granted to groups that no longer exist.
 
 ## Verifying access
 

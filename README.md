@@ -1,5 +1,7 @@
 # ap-pelican-group-provisioner
 
+Built to provision LDAP groups to AP40 and AP41.
+
 Scripts that synchronize LDAP users and groups into a Pelican Origin. Packaged as a single
 Docker image, configured by a YAML file plus environment variables for secrets.
 
@@ -19,10 +21,11 @@ overrides the same setting in the file. See `config.example.yaml` for every sett
 `.env.example` for the secrets. The file is found via `CONFIG_FILE`, then `./config.yaml`,
 then `/etc/provisioner/config.yaml`.
 
-The `jobs` list maps LDAP groups to base paths. A `users` job gives each member a collection
-at `<base_path>/<username>`. A `projects` job matches members' other group memberships against
-the project names in a Topology JSON feed and gives each project with members a collection at
-`<base_path>/<project>`, granted to a Pelican group of the project's members.
+The `jobs` list maps LDAP groups to base paths, and every job names its `kind`. A `users` job
+gives each member a collection at `<base_path>/<username>`. A `projects` job matches members'
+other group memberships against the project names in a Topology JSON feed and gives each
+project with members a collection at `<base_path>/<project>`, granted to a Pelican group of the
+project's members. At most one `projects` job is allowed per Origin.
 
 The provisioner owns each base path exclusively. Anything under it that is not a current
 member's collection is deleted, and nothing outside it is ever touched. A run that would
@@ -40,6 +43,31 @@ uv run --env-file .env sync-collections
 ```
 
 Run the tests with `uv run pytest`.
+
+### Integration tests against a real Origin
+
+```
+scripts/test-origin.sh                 # start Origin, run tests/integration, remove Origin
+scripts/test-origin.sh -k crash -x     # extra arguments go to pytest
+KEEP_ORIGIN=1 scripts/test-origin.sh   # leave it running; later `uv run pytest` includes these tests
+```
+
+This starts `hub.osg-htc.org/pelican_platform/origin:v26.0` as a standalone Origin (no
+Director or Registry) on https://localhost:18444 using `tests/integration/compose.yaml`, mints an
+admin token inside the container with `pelican-server token create`, and runs the provisioner
+against it with LDAP and the Topology feed faked. The tests check access by following each
+collection's ACLs on the Origin through group membership to users, as people join, leave, move
+between projects and come back. The crash-recovery tests stop a run before each of its writes in
+turn, check that the partial state never gives anyone access they would not have before or after
+the change, and check that the next run converges. Without a running Origin these tests are
+skipped. Requires Docker with Compose.
+
+CI (`.github/workflows/test.yaml`) runs the unit and integration tests together on every push
+to `main` and every pull request, with `PELICAN_TEST_REQUIRE_ORIGIN=1` so an Origin that fails to
+start fails the build instead of skipping the integration tests.
+
+To point the tests at a different Origin, set `PELICAN_TEST_ORIGIN_URL` and either
+`PELICAN_TEST_CONTAINER` (where to run `pelican-server token create`) or `PELICAN_TEST_TOKEN`.
 
 ## Container
 
@@ -70,3 +98,10 @@ CURL_INSECURE=1 NAMESPACE=/test BASE_PATH=/test/data scripts/test-collection-acc
 `NAMESPACE` is the Origin's exported namespace (which selects the issuer) and `BASE_PATH` is
 the job's base path. Set `ORIGIN_URL` and `DATA_URL` for a non-local Origin. Requires `curl`
 and `jq`.
+
+
+## Token Workaround
+
+```shell
+pelican-server token create --issuer https://localhost:8444 --subject admin --raw-scope "server.admin web_ui.access" --lifetime 864000 pelican://localhost:8444/test        
+```

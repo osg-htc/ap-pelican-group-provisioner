@@ -1,0 +1,19 @@
+# Standalone Pelican Origin for tests/integration. Started and stopped by scripts/test-origin.sh.
+name: provisioner-test
+
+services:
+  origin:
+    image: hub.osg-htc.org/pelican_platform/origin:v26.0
+    container_name: provisioner-test-origin
+    command: ["serve"]
+    ports:
+      - "18444:18444"
+    volumes:
+      - ./origin/pelican.yaml:/etc/pelican/pelican.yaml:ro
+    tmpfs:
+      - /data/test
+    healthcheck:
+      test: ["CMD", "curl", "-sfk", "https://localhost:18444/.well-known/openid-configuration"]
+      interval: 2s
+      timeout: 5s
+      retries: 60

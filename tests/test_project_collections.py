@@ -198,4 +198,3 @@ def test_group_create_failure_leaves_project_for_next_run(pelican):
 def test_projects_job_requires_url():
     with pytest.raises(ValueError, match="projects_url"):
         Job(kind="projects", group="g", base_path="/p")
-    assert Job(group="g", base_path="/p").kind == "users"

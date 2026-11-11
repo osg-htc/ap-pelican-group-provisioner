@@ -35,7 +35,7 @@ def make_settings(**overrides) -> Settings:
         admin_password="secret",
         collection_role=overrides.pop("collection_role", "write"),
     )
-    jobs = overrides.pop("jobs", None) or [Job(group=GROUP, base_path=overrides.pop("base_path", BASE_PATH))]
+    jobs = overrides.pop("jobs", None) or [Job(kind="users", group=GROUP, base_path=overrides.pop("base_path", BASE_PATH))]
     run = RunSettings(
         dry_run=overrides.pop("dry_run", False),
         max_delete_fraction=overrides.pop("max_delete_fraction", 0.05),

@@ -31,9 +31,11 @@ YAML = textwrap.dedent("""
       verify_tls: false
       collection_role: read
     jobs:
-      - group: ap40-login
+      - kind: users
+        group: ap40-login
         base_path: /test/data/
-      - group: ap41-login
+      - kind: users
+        group: ap41-login
         base_path: /ospool/ap41
     log_level: DEBUG
 """)
@@ -100,7 +102,7 @@ def test_env_only_with_single_job_fallback(clean_env):
         clean_env.setenv(k, v)
 
     s = load_settings()
-    assert s.jobs == [Job(group="ap40-login", base_path="/test/data")]
+    assert s.jobs == [Job(kind="users", group="ap40-login", base_path="/test/data")]
 
 
 def test_jobs_from_env_json(clean_env):
@@ -108,7 +110,7 @@ def test_jobs_from_env_json(clean_env):
         "LDAP_SERVER": "ldap.example.org", "LDAP_BIND_DN": "cn=ro,dc=example",
         "LDAP_USER_SEARCH_BASE": "ou=people,dc=example",
         "PELICAN_ORIGIN_URL": "https://origin.example.org",
-        "JOBS": '[{"group": "g1", "base_path": "/a"}, {"group": "g2", "base_path": "/b/c"}]',
+        "JOBS": '[{"kind": "users", "group": "g1", "base_path": "/a"}, {"kind": "users", "group": "g2", "base_path": "/b/c"}]',
         **SECRETS,
     }
     for k, v in env.items():
@@ -118,7 +120,7 @@ def test_jobs_from_env_json(clean_env):
 
 
 def test_reports_every_problem_at_once(clean_env, tmp_path):
-    path = write_yaml(tmp_path, "pelican:\n  collection_role: admin\njobs:\n  - group: g\n    base_path: relative\n")
+    path = write_yaml(tmp_path, "pelican:\n  collection_role: admin\njobs:\n  - kind: users\n    group: g\n    base_path: relative\n")
     with pytest.raises(ConfigError) as info:
         load_settings(str(path))
     msg = str(info.value)
@@ -159,8 +161,8 @@ def test_missing_explicit_config_file(clean_env):
 
 def test_base_path_rejects_traversal():
     with pytest.raises(ValueError):
-        Job(group="g", base_path="/test/../etc")
-    assert Job(group="g", base_path="/test//data/").base_path == "/test/data"
+        Job(kind="users", group="g", base_path="/test/../etc")
+    assert Job(kind="users", group="g", base_path="/test//data/").base_path == "/test/data"
 
 
 def test_secrets_not_in_repr(clean_env, tmp_path):
@@ -215,7 +217,7 @@ def test_fallback_job_bad_base_path_names_the_variable(clean_env):
 
 def test_projects_job_from_yaml(clean_env, tmp_path):
     path = write_yaml(tmp_path, YAML.replace(
-        "  - group: ap41-login\n    base_path: /ospool/ap41\n",
+        "  - kind: users\n    group: ap41-login\n    base_path: /ospool/ap41\n",
         "  - kind: projects\n    group: CO:members:active\n    base_path: /ospool/projects\n"
         "    projects_url: https://topology.example.org/miscproject/json\n"))
     for k, v in SECRETS.items():
@@ -228,10 +230,32 @@ def test_projects_job_from_yaml(clean_env, tmp_path):
 
 def test_projects_job_without_url_is_reported(clean_env, tmp_path):
     path = write_yaml(tmp_path, YAML.replace(
-        "  - group: ap41-login\n    base_path: /ospool/ap41\n",
+        "  - kind: users\n    group: ap41-login\n    base_path: /ospool/ap41\n",
         "  - kind: projects\n    group: CO:members:active\n    base_path: /ospool/projects\n"))
     for k, v in SECRETS.items():
         clean_env.setenv(k, v)
     with pytest.raises(ConfigError) as info:
         load_settings(str(path))
     assert "jobs.1: Value error, a projects job needs projects_url" in str(info.value)
+
+
+def test_job_kind_is_required(clean_env, tmp_path):
+    path = write_yaml(tmp_path, YAML.replace("  - kind: users\n    group: ap41-login\n", "  - group: ap41-login\n"))
+    for k, v in SECRETS.items():
+        clean_env.setenv(k, v)
+    with pytest.raises(ConfigError) as info:
+        load_settings(str(path))
+    assert "jobs.1.kind: Field required" in str(info.value)
+
+
+def test_second_projects_job_is_rejected(clean_env, tmp_path):
+    projects = ("  - kind: projects\n    group: {g}\n    base_path: {p}\n"
+                "    projects_url: https://topology.example.org/miscproject/json\n")
+    path = write_yaml(tmp_path, YAML.replace(
+        "  - kind: users\n    group: ap41-login\n    base_path: /ospool/ap41\n",
+        projects.format(g="CO:members:active", p="/ospool/projects") + projects.format(g="CO:other", p="/ospool/other")))
+    for k, v in SECRETS.items():
+        clean_env.setenv(k, v)
+    with pytest.raises(ConfigError) as info:
+        load_settings(str(path))
+    assert "only one projects job is supported per Origin, got 2 ('CO:members:active', 'CO:other')" in str(info.value)

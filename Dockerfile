@@ -14,19 +14,22 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-dev --no-editable
 
-# Runtime stage: only the virtual environment and the source.
+# Runtime stage: only the virtual environment, which now holds the installed package.
 FROM python:3.12-slim-bookworm
 
-RUN useradd --system --uid 1000 --create-home provisioner
+RUN groupadd --system --gid 1000 provisioner && \
+    useradd --system --uid 1000 --gid 1000 --create-home provisioner
 
-COPY --from=builder --chown=provisioner:provisioner /app /app
+# Owned by root so the runtime user cannot modify its own code.
+COPY --from=builder /app/.venv /app/.venv
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
 
-USER provisioner
+# Numeric so Kubernetes runAsNonRoot can verify the user.
+USER 1000:1000
 WORKDIR /app
 
 # Mount the YAML config at /etc/provisioner/config.yaml and pass secrets as environment

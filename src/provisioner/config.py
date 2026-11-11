@@ -167,9 +167,9 @@ class Job(BaseModel):
     Origin exporting /test. The script owns it exclusively.
     """
 
+    kind: Literal["users", "projects"]
     group: str
     base_path: str
-    kind: Literal["users", "projects"] = "users"
     projects_url: str | None = None
 
     @field_validator("base_path")
@@ -215,6 +215,19 @@ class RunSettings(SectionSettings):
                     raise ValueError(
                         f"jobs {a.group!r} ({a.base_path}) and {b.group!r} ({b.base_path}) have the same or nested base paths"
                     )
+        return jobs
+
+    @field_validator("jobs")
+    @classmethod
+    def _one_projects_job(cls, jobs: list[Job]) -> list[Job]:
+        """A projects job deletes every marked group that is not one of its own projects, so a
+        second projects job on the same Origin would delete the first one's groups each run."""
+        projects = [j for j in jobs if j.kind == "projects"]
+        if len(projects) > 1:
+            raise ValueError(
+                f"only one projects job is supported per Origin, got {len(projects)} "
+                f"({', '.join(repr(j.group) for j in projects)}); each would delete the other's groups"
+            )
         return jobs
 
 
@@ -288,7 +301,7 @@ def _fallback_job_from_env(problems: list[str]) -> list[Job]:
         problems.append("PELICAN_BASE_PATH: required when LDAP_GROUP is set without a `jobs` list")
     else:
         try:
-            return [Job(group=group, base_path=base_path)]
+            return [Job(kind="users", group=group, base_path=base_path)]
         except ValidationError as exc:
             problems.extend(f"PELICAN_BASE_PATH: {item['msg']}" for item in exc.errors())
     return []

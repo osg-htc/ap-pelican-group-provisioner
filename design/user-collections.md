@@ -88,9 +88,12 @@ Each job is one LDAP group synchronized into one subtree of the Origin:
 
 ```yaml
 jobs:
-  - group: ap40-login
+  - kind: users
+    group: ap40-login
     base_path: /test/data
 ```
+
+`kind` is required on every job (`users` or `projects`).
 
 `base_path` is the prefix under which every member's collection is created, giving
 `/test/data/<employeeNumber>`. It is a federation path that must be at or below a namespace

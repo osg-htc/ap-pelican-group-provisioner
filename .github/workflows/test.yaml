@@ -1,0 +1,42 @@
+name: Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit and Origin integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Start standalone Pelican Origin
+        run: docker compose -f tests/integration/compose.yaml up -d --wait
+
+      - name: Run tests
+        env:
+          # Fail, rather than skip, the integration tests if the Origin is not reachable.
+          PELICAN_TEST_REQUIRE_ORIGIN: "1"
+        run: uv run pytest -ra
+
+      - name: Origin logs
+        if: failure()
+        run: docker compose -f tests/integration/compose.yaml logs origin
+
+      - name: Stop Origin
+        if: always()
+        run: docker compose -f tests/integration/compose.yaml down -v

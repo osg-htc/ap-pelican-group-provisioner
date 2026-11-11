@@ -29,3 +29,6 @@ packages = ["src/provisioner"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "origin: needs the Pelican Origin started by scripts/test-origin.sh (skipped when it is not running)",
+]

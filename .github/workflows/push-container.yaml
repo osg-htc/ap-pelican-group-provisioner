@@ -13,4 +13,4 @@ jobs:
     uses: osg-htc/build-push/.github/workflows/build-push.yaml@34bb494bf3c926aafcd210c4eecb1e6088fc65f2 # main as of 2025-03-12
     secrets: inherit
     with:
-      image: 'hub.opensciencegrid.org/opensciencegrid/origin-collection-sync'
+      image: 'hub.opensciencegrid.org/opensciencegrid/ap-pelican-group-provisioner'
