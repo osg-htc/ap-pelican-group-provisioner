@@ -14,6 +14,68 @@ Docker image, configured by a YAML file plus environment variables for secrets.
 
 One command runs every job in `config.yaml`.
 
+## Operations contract (TL;DR)
+
+**What it does.** Each run makes the Origin match LDAP and Topology, then exits. Running it
+again with nothing changed makes no changes, so it is safe to run on a schedule.
+
+- `users` job: every member of the LDAP group gets a collection at
+  `<base_path>/<employeeNumber>` that only their own Pelican user can write to.
+- `projects` job: every Topology project with at least one member gets a collection at
+  `<base_path>/<project>`, writable by a Pelican group named after the project whose members
+  are exactly the project's LDAP members.
+- People are matched to Pelican users by CILogon identity (`sub`)
+
+**What it owns, and will change without asking.**
+
+- Everything under each job's `base_path`. Any collection there that it did not create for a
+  current member or project is deleted, including ones made by hand.
+- The membership of each project group. Members added by hand are removed on the next run.
+- Project groups anyone else controls. A project group owned by another account, or with
+  another user or group as its administrator, is deleted and recreated under the
+  provisioner's account.
+
+**What it never does.**
+
+- Delete Pelican users.
+- Touch collections outside the base paths. The one exception is its own collections left at
+  an old `base_path`, identified by their metadata.
+- Remove a grant someone added directly to a collection. To give a person extra access, grant
+  them on the collection, not through the project group.
+- Remove group members Pelican added from a CILogon login.
+- Create a collection from a name containing `/`, or one that is `.` or `..`. Those members or
+  projects are reported and skipped; dots inside a name are fine.
+
+**When it stops before changing anything** (exit code 2):
+
+- More than 5% of a job's collections would be deleted, or more than 5% of its project groups
+  replaced. One is always allowed. Set `ALLOW_MASS_DELETE=true` for one run if intended, for
+  example after changing a `base_path` or the account the provisioner runs as.
+- An LDAP group comes back empty (`LDAP_ALLOW_EMPTY_GROUP=true` to allow it).
+- LDAP, the Topology feed or the Origin cannot be read, or its own account cannot be identified.
+- A hard error in one job also skips the jobs listed after it.
+
+**Exit codes.** `0` = everything reconciled. `1` = finished, but some people or projects could
+not be processed; the log says which, and the next run retries them. `2` = stopped; see above,
+or an unexpected error. Alert on `2`, and on `1` that persists across runs.
+
+**What operations must provide.**
+
+- One run at a time, for example a CronJob with `concurrencyPolicy: Forbid`. Overlapping runs
+  can create duplicates.
+- At most one `projects` job per Origin (config validation enforces this).
+- A stable admin account (`PELICAN_API_TOKEN`, or admin username and password) that has
+  accepted the Origin's AUP. Switching accounts makes every project group look foreign; see
+  `ALLOW_MASS_DELETE` above.
+- `DRY_RUN=true` for the first run against a new Origin.
+
+**Known limits.**
+
+- People bulk-imported without a CILogon ID have a placeholder `sub`
+  (`dummy-text-for-provisioning-…`) and cannot log in to the account made for them. When
+  COManage records their real `sub`, the next run moves their access to an account with the
+  real identity, named e.g. `alice2`, because the placeholder account keeps `alice`.
+
 ## Configuration
 
 Structure goes in a YAML file, secrets go in the environment, and any environment variable
