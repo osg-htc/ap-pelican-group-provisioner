@@ -95,35 +95,66 @@ def test_second_run_is_a_no_op(pelican):
     assert report.exit_code == EXIT_OK
 
 
-def test_reuses_group_pelican_created_from_oidc_claims(pelican):
-    alice = pelican.add_user("alice")
-    existing = pelican.add_group("ACE_NIAID", members=[alice.id], source="oidc")   # no marker, oidc-sourced
+@pytest.mark.parametrize("source", ["oidc", "file", "github", "unknown"])
+def test_group_from_a_provider_is_replaced_by_one_the_provisioner_creates(pelican, source):
+    """A group Pelican made from a login claim (or another provider) with the project's name
+    is owned by the built-in admin, but the provider decides its members. It is deleted and
+    recreated through the API, so the provisioner alone decides membership."""
+    alice = pelican.add_user("alice"); zed = pelican.add_user("zed")
+    existing = pelican.add_group("ACE_NIAID", members=[alice.id, zed.id], source=source)
 
-    report = run(pelican, [ALICE, BOB])
+    report = run(pelican, [ALICE])
 
-    assert pelican.group_named("ACE_NIAID").id == existing.id                       # reused, not recreated
-    assert not any(c[0] == "create_group" and c[1] == "ACE_NIAID" for c in pelican.calls)
-    assert report.groups_created == 1                                               # only EvolSims, bob's other project
-    bob = next(u for u in pelican.users.values() if u.username == "bob")
-    assert {m.user_id for m in pelican.group_named("ACE_NIAID").members} == {alice.id, bob.id}
-    assert ("add_group_member", existing.id, bob.id) in pelican.calls
-    assert not any(c == ("add_group_member", existing.id, alice.id) for c in pelican.calls)   # already a member
+    assert existing.id not in pelican.groups
+    new = pelican.group_named("ACE_NIAID")
+    assert new.source == "pelican" and new.owner_id == ADMIN_ID and new.description == DESCRIPTION
+    assert {m.user_id for m in new.members} == {alice.id}
+    assert report.groups_replaced == 1 and report.exit_code == EXIT_OK
 
 
-def test_membership_is_reconciled_but_oidc_rows_are_kept(pelican):
+def test_provider_group_for_a_project_without_members_is_left_alone(pelican):
+    """Only groups for projects with members are the provisioner's business."""
+    evol = pelican.add_group("EvolSims", source="oidc")
+    report = run(pelican, [ALICE])                      # nobody in EvolSims
+    assert pelican.group_named("EvolSims").id == evol.id
+    assert report.groups_replaced == 0
+
+
+def test_groups_not_named_after_a_project_are_left_alone(pelican):
+    """Groups that are not Topology projects are none of the provisioner's business, whatever
+    their source, owner, admin or members, even when a project member is in them."""
+    alice = pelican.add_user("alice"); zed = pelican.add_user("zed")
+    others = [
+        pelican.add_group("ospool-login", members=[alice.id, zed.id], source="oidc"),   # alice's LDAP group
+        pelican.add_group("CO:members:active", members=[alice.id], source="oidc"),     # the job's own group
+        pelican.add_group("hand-made", members=[zed.id], source="pelican", owner_id="someone-else",
+                          admin_id="zed-group", admin_type="group"),
+        pelican.add_group("ours-unmarked", members=[zed.id], source="pelican"),
+        pelican.add_group("Unknown_Project", members=[zed.id], source="github"),      # not in the feed
+        pelican.add_group("ace_niaid", members=[zed.id], source="oidc"),              # differs by case only
+    ]
+    before = {g.id: g for g in others}
+
+    report = run(pelican, [ALICE])
+
+    assert {g.id: pelican.groups.get(g.id) for g in others} == before
+    touched = {c[1] for c in pelican.writes() if c[0] in ("delete_group", "add_group_member", "remove_group_member")}
+    assert touched.isdisjoint(before)
+    assert report.groups_replaced == 0 and report.groups_deleted == 0 and report.exit_code == EXIT_OK
+
+
+def test_membership_is_exactly_the_project_whatever_the_member_source(pelican):
     alice = pelican.add_user("alice"); bob = pelican.add_user("bob"); zed = pelican.add_user("zed")
-    # bob was added by an earlier run (api-sourced) but has left the project; zed's row was
-    # asserted by Pelican from a login claim (oidc-sourced) and is not in the LDAP project.
+    # bob was added by an earlier run but has left the project; zed's row claims to come from
+    # a login claim (Pelican does not mirror into API groups, but a legacy row could exist).
     group = pelican.add_group("ACE_NIAID", members=[bob.id], description=DESCRIPTION, source="pelican")
     pelican.groups[group.id] = replace(group, members=group.members + (GroupMember(user_id=zed.id, source="oidc"),))
 
     report = run(pelican, [ALICE])
 
-    members = {m.user_id: m.source for m in pelican.group_named("ACE_NIAID").members}
-    assert alice.id in members                      # added
-    assert bob.id not in members                    # removed: api-sourced and not in the project
-    assert zed.id in members                        # kept: oidc-sourced
-    assert report.members_added == 1 and report.members_removed == 1
+    members = {m.user_id for m in pelican.group_named("ACE_NIAID").members}
+    assert members == {alice.id}
+    assert report.members_added == 1 and report.members_removed == 2
 
 
 def test_departed_project_collection_and_marker_group_removed(pelican):
@@ -278,9 +309,9 @@ def test_group_someone_else_controls_is_deleted_and_recreated(pelican, control):
 
 
 def test_group_the_provisioner_controls_is_kept(pelican):
-    """Unmarked but owned by the provisioner's account (e.g. asserted from OIDC, which
-    Pelican gives to the built-in admin), and the provisioner as its user admin: adopted."""
-    group = pelican.add_group("ACE_NIAID", admin_id=ADMIN_ID, admin_type="user")
+    """Made through the API without the marker (e.g. by an admin by hand), owned by the
+    provisioner's account, with the provisioner as its user admin: adopted."""
+    group = pelican.add_group("ACE_NIAID", admin_id=ADMIN_ID, admin_type="user", source="pelican")
     report = run(pelican, [ALICE])
     assert pelican.group_named("ACE_NIAID").id == group.id
     assert report.groups_replaced == 0
@@ -332,3 +363,12 @@ def test_unknown_own_account_is_a_hard_error(pelican):
     with pytest.raises(HardError, match="own Pelican account"):
         run(pelican, [ALICE])
     assert pelican.writes() == []
+
+
+def test_group_source_missing_falls_back_to_the_ownership_check(pelican):
+    """A Pelican too old to report group sources: the group is judged by owner and admin only,
+    so groups the provisioner made are not replaced on every run."""
+    group = pelican.add_group("ACE_NIAID", source="")
+    report = run(pelican, [ALICE])
+    assert pelican.group_named("ACE_NIAID").id == group.id
+    assert report.groups_replaced == 0

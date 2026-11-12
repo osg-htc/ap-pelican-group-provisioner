@@ -105,11 +105,13 @@ class FakePelican:
 
     def add_group(self, name: str, members: list[str] = (), description: str = "", source: str = "oidc",
                   owner_id: str = ADMIN_ID, admin_id: str = "", admin_type: str = "") -> PelicanGroup:
-        """Arrange a group. Default source 'oidc' mimics a group Pelican asserted from a login
-        claim, which Pelican gives to the built-in admin, here the provisioner's account."""
+        """Arrange a group. `source` is both the group's source and its members'. Default
+        'oidc' mimics a group Pelican asserted from a login claim, which Pelican gives to the
+        built-in admin, here the provisioner's account. Use 'pelican' for one made through
+        the groups API."""
         g = PelicanGroup(id=self._id("g"), name=name, description=description,
                          members=tuple(GroupMember(user_id=m, source=source) for m in members),
-                         owner_id=owner_id, admin_id=admin_id, admin_type=admin_type)
+                         owner_id=owner_id, admin_id=admin_id, admin_type=admin_type, source=source)
         self.groups[g.id] = g
         return g
 

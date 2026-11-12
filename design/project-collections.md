@@ -54,17 +54,25 @@ like any other unwanted collection under the base path.
 Pelican already creates groups on its own: when a user logs in through CILogon, every
 asserted group claim becomes a group row with `source: oidc` and the user becomes a member
 with the same source. Project names are among those claims, so a project group may exist
-before this job ever runs. Groups are therefore matched by name and reused if the
-provisioner's own account controls them; only missing groups are created.
+before this job ever runs. The only project groups this job keeps are ones it could have
+made itself; any other group with a project's name is replaced, and missing groups are
+created.
 
-**Who controls a group.** Besides system admins, Pelican lets two parties change a group's
-membership: its owner (`ownerId`), and its group admin (`adminId`, a single user when
-`adminType` is `user`, or every member of another group when it is `group`). Anyone in either
-role could add people to a project group between runs, and they would get the project's
-collection. So each run reads its own user ID from `GET /me` and keeps a project group only
-when that account is the owner and there is no group admin, or the group admin is that same
-user. Pelican gives groups it creates from login claims to the built-in admin, so when the
-provisioner runs as the built-in admin those are kept too.
+**Who controls a group.** Three parties besides system admins can decide who is in a group:
+
+- the **provider**, for a group whose `source` is anything but `pelican` (`oidc`, `file`,
+  `github`, or `unknown` after a migration). Pelican mirrors the provider's claims into its
+  membership at each login. Only groups made through the groups API have `source: pelican`,
+  and Pelican never mirrors claims into those.
+- the **owner** (`ownerId`).
+- the **group admin** (`adminId`: a single user when `adminType` is `user`, or every member
+  of another group when it is `group`).
+
+Any of them could put people in a project group between runs, and they would get the
+project's collection. So each run reads its own user ID from `GET /me` and keeps a project
+group only when its source is `pelican`, that account is the owner, and there is no group
+admin or the group admin is that same user. A Pelican too old to report `source` is judged by
+owner and admin only.
 
 A project group anyone else controls is **deleted and recreated** under the provisioner's
 account, with the marker description and the project's members; the collection is then
@@ -73,18 +81,21 @@ the project has no access at all, never the old controller's. If the delete fail
 is skipped for that run rather than granted to the foreign group. Only groups named after a
 project with members are checked; other groups on the Origin are not touched.
 
+Deleting a group also deletes every grant, scope and group-admin role that names it, on any
+collection, not only this job's (`DeleteGroup` in Pelican). So replacing a login-claim group
+ends any access other people had given that group on their own collections; they must grant
+the new group instead. After replacement Pelican leaves the name alone: a later login
+asserting it does not make a second group, because a `pelican` group already holds the name.
+
 Replacement changes the group's ID, so it is under the same ceiling as collection deletions:
 more than `max_delete_fraction` of the project groups in use (always allowing one) stops the
-run before any write. The likely cause of a mass replacement is the provisioner running as a
-different account than before, which makes every group look foreign; `ALLOW_MASS_DELETE=true`
-for one run moves them all to the new account.
+run before any write. There are two expected causes of a mass replacement: the first
+run on an Origin where CILogon logins have already made groups for many projects, and the
+provisioner running as a different account than before, which makes every group look
+foreign. In both cases `ALLOW_MASS_DELETE=true` for one run replaces them all.
 
-Membership is reconciled per group: members the project has and the group lacks are added;
-members the group has and the project lacks are removed, **except** rows Pelican asserted
-from a login claim (`source: oidc`). Rows this job adds through the API come back with
-`source: pelican`, so they are removable. Both sides read the same directory, so an
-`oidc` row can only disagree transiently, and Pelican would re-assert it at the next login
-anyway.
+Membership is reconciled per group to exactly the project's members: members the project has
+and the group lacks are added, and every other member is removed, whatever its `source`.
 
 Verified on 2026-09-23: a member of `OSG-Staff` obtained a token from the `/test` issuer
 carrying read, modify and create on `/projects/OSG-Staff` (and on `/projects/CHTC-Staff`,
@@ -98,7 +109,12 @@ only replaced, as above, while their project has members and someone else contro
 
 Because the group carries the project name, a member's token gets the collection's scopes
 two ways: through the DB membership this job maintains, and through the `wlcg.groups` claim
-CILogon asserts. Either alone is sufficient.
+CILogon asserts. Either alone is sufficient. The second path does not depend on the group's
+source: Pelican resolves a claimed group name to whichever live group holds that name,
+including one made through the API (`ResolveCallerACLSubjects`, deliberately). So anyone
+CILogon says is in a project gets the project's collection even if this job has not added
+them, or has removed them. CILogon and LDAP read the same COManage directory, so the two
+paths agree except while a change is propagating.
 
 ## Algorithm
 
@@ -128,8 +144,8 @@ the deletion ceiling defaults to 5% with one always allowed, `ALLOW_MASS_DELETE`
 override, and the empty-group guard stops a misspelled group from draining the base path.
 
 Specific to this kind: the project list is a hard dependency and its absence aborts the
-run; OIDC-asserted group memberships are never removed; a project group someone other than
-the provisioner's account controls is replaced, under the deletion ceiling; and a `users` job and a `projects` job may share an Origin because collection
+run; a project group not created through the API, or controlled by anyone other than the
+provisioner's account, is replaced, under the deletion ceiling; and a `users` job and a `projects` job may share an Origin because collection
 metadata carries the job kind as well as the group, so neither recognizes the other's
 leftovers as its own. Jobs still may not share or nest base paths.
 

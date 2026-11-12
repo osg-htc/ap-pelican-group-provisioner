@@ -30,10 +30,12 @@ again with nothing changed makes no changes, so it is safe to run on a schedule.
 
 - Everything under each job's `base_path`. Any collection there that it did not create for a
   current member or project is deleted, including ones made by hand.
-- The membership of each project group. Members added by hand are removed on the next run.
-- Project groups anyone else controls. A project group owned by another account, or with
-  another user or group as its administrator, is deleted and recreated under the
-  provisioner's account.
+- The membership of each project group. Members added by hand, or by any other means, are
+  removed on the next run.
+- Project groups it did not create. A project group made by Pelican from CILogon logins (or
+  any other group source), owned by another account, or with another user or group as its
+  administrator, is deleted and recreated under the provisioner's account. Deleting it also
+  removes any access other people had granted to that group on their own collections.
 
 **What it never does.**
 
@@ -42,7 +44,6 @@ again with nothing changed makes no changes, so it is safe to run on a schedule.
   an old `base_path`, identified by their metadata.
 - Remove a grant someone added directly to a collection. To give a person extra access, grant
   them on the collection, not through the project group.
-- Remove group members Pelican added from a CILogon login.
 - Create a collection from a name containing `/`, or one that is `.` or `..`. Those members or
   projects are reported and skipped; dots inside a name are fine.
 
@@ -50,7 +51,8 @@ again with nothing changed makes no changes, so it is safe to run on a schedule.
 
 - More than 5% of a job's collections would be deleted, or more than 5% of its project groups
   replaced. One is always allowed. Set `ALLOW_MASS_DELETE=true` for one run if intended, for
-  example after changing a `base_path` or the account the provisioner runs as.
+  example after changing a `base_path` or the account the provisioner runs as, or on the
+  first run against an Origin where CILogon logins have already created project groups.
 - An LDAP group comes back empty (`LDAP_ALLOW_EMPTY_GROUP=true` to allow it).
 - LDAP, the Topology feed or the Origin cannot be read, or its own account cannot be identified.
 - A hard error in one job also skips the jobs listed after it.
@@ -70,6 +72,10 @@ or an unexpected error. Alert on `2`, and on `1` that persists across runs.
 - `DRY_RUN=true` for the first run against a new Origin.
 
 **Known limits.**
+
+- Pelican also grants a project's collection to anyone whose CILogon login lists a group with
+  the project's name, whether or not the provisioner put them in the group. CILogon and LDAP
+  read the same COManage directory, so this only differs while a change is propagating.
 
 - People bulk-imported without a CILogon ID have a placeholder `sub`
   (`dummy-text-for-provisioning-…`) and cannot log in to the account made for them. When

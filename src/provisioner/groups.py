@@ -13,15 +13,17 @@ log = logging.getLogger(__name__)
 
 
 class GroupProvisioner:
-    """Groups are matched by name. A group that already exists, including one Pelican
-    created from an OIDC claim, is reused if the provisioner's own account controls it;
-    only its membership is reconciled. Members Pelican asserted from a login claim (source
-    "oidc") are never removed, since Pelican re-asserts them on the next login and both
-    sides read the same directory anyway.
+    """Groups are matched by name. An existing project group is reused only if it is one
+    the provisioner could have made itself: created through the groups API (source
+    "pelican") and controlled by the provisioner's own account. Its membership is then made
+    exactly the project's members, whatever each member's source.
 
-    A project group that anyone else can manage (owned by another account, or with another
-    user or group as its group admin) is deleted and recreated. Its owner or admin could
-    otherwise add people between runs, and they would get the project's collection.
+    Any other project group is deleted and recreated: one Pelican made from a login claim
+    or another provider (source "oidc", "file", "github", "unknown"), one owned by another
+    account, or one with another user or group as its group admin. Its owner, admin or
+    provider could otherwise decide who is in it, and so who gets the project's collection.
+    Pelican never mirrors provider memberships into a "pelican" group, so after replacement
+    every member is one this script added.
     """
 
     def __init__(self, pelican, settings: PelicanSettings, report: SyncReport, dry_run: bool) -> None:
@@ -55,8 +57,11 @@ class GroupProvisioner:
 
     @staticmethod
     def who_else_controls(group: PelicanGroup, me: str) -> str | None:
-        """Why someone other than `me` (or a system admin) can change this group's
-        membership, or None when only `me` can."""
+        """Why someone other than `me` (or a system admin) decides this group's membership,
+        or None when only `me` does."""
+        # An empty source means a Pelican too old to report one; ownership still applies.
+        if group.source and group.source != "pelican":
+            return f"from the {group.source!r} group source, not created by the provisioner"
         if group.owner_id != me:
             return f"owned by {group.owner_id or 'nobody'}"
         if group.admin_id and not (group.admin_type == "user" and group.admin_id == me):
@@ -173,8 +178,6 @@ class GroupProvisioner:
                 continue
             self.report.members_added += 1
         for user_id in sorted(set(current) - wanted_ids):
-            if current[user_id] == "oidc":
-                continue
             if self._dry_run:
                 log.info("DRY RUN: would remove user %s from group %s", user_id, name)
                 self.report.members_removed += 1
