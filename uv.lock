@@ -29,6 +29,7 @@ name = "ap-pelican-group-provisioner"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "certifi" },
     { name = "httpx" },
     { name = "ldap3" },
     { name = "pydantic" },
@@ -43,6 +44,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi", specifier = ">=2026.7.22" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "ldap3", specifier = ">=2.9" },
     { name = "pydantic", specifier = ">=2.7" },

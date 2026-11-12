@@ -89,6 +89,13 @@ class LdapSettings(SectionSettings):
     server: str
     port: int = 636
     use_ssl: bool = True
+    # TLS: the server's certificate must chain to a trusted CA (certifi's bundle, or
+    # ca_bundle) and name the server. tls_server_name is an extra name to accept, for a
+    # tunnel such as `localhost` forwarded to the real replica. verify_tls=false turns
+    # every check off and is for local test directories only.
+    verify_tls: bool = True
+    ca_bundle: str | None = None
+    tls_server_name: str | None = None
     bind_dn: str
     bind_password: SecretStr
     user_search_base: str

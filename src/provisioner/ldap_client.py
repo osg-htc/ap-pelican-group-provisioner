@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
+import ssl
 from dataclasses import dataclass
 
+import certifi
 import ldap3
 from ldap3.core.exceptions import LDAPException
 from ldap3.utils.conv import escape_filter_chars
@@ -40,6 +43,26 @@ def _first(value: object) -> str | None:
     return values[0] if values else None
 
 
+def tls_config(s: LdapSettings) -> ldap3.Tls:
+    """Require a certificate that chains to a trusted CA and names the server.
+
+    ldap3 verifies nothing by default, which would let anyone on the path pose as the
+    directory, collect the bind password and hand back invented memberships.
+    """
+    if not s.verify_tls:
+        log.warning("LDAP TLS verification is disabled (LDAP_VERIFY_TLS=false)")
+        return ldap3.Tls(validate=ssl.CERT_NONE)
+    ca_file = s.ca_bundle or certifi.where()
+    if not os.path.isfile(ca_file):
+        # ldap3 silently ignores a missing file and would fall back to no CA at all.
+        raise LdapError(f"LDAP CA bundle {ca_file} does not exist")
+    return ldap3.Tls(
+        validate=ssl.CERT_REQUIRED,
+        ca_certs_file=ca_file,
+        valid_names=[s.tls_server_name] if s.tls_server_name else None,
+    )
+
+
 class LdapClient:
     def __init__(self, settings: LdapSettings) -> None:
         self._settings = settings
@@ -51,6 +74,7 @@ class LdapClient:
             s.server,
             port=s.port,
             use_ssl=s.use_ssl,
+            tls=tls_config(s),
             connect_timeout=s.timeout_seconds,
             get_info=ldap3.NONE,
         )
